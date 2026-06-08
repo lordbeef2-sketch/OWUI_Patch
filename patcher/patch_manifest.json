@@ -1,0 +1,71 @@
+{
+  "patch_id": "owui-twc-sso-ocr-v1",
+  "target": "open-webui",
+  "target_version": "0.9.2",
+  "dependencies": [
+    "rapidocr-onnxruntime",
+    "pillow",
+    "pymupdf"
+  ],
+  "files": [
+    {
+      "source": "payload/open_webui/config.py",
+      "target": "open_webui/config.py"
+    },
+    {
+      "source": "payload/open_webui/main.py",
+      "target": "open_webui/main.py"
+    },
+    {
+      "source": "payload/open_webui/routers/auths.py",
+      "target": "open_webui/routers/auths.py"
+    },
+    {
+      "source": "payload/open_webui/routers/files.py",
+      "target": "open_webui/routers/files.py"
+    },
+    {
+      "source": "payload/open_webui/retrieval/loaders/main.py",
+      "target": "open_webui/retrieval/loaders/main.py"
+    },
+    {
+      "source": "payload/open_webui/utils/oauth.py",
+      "target": "open_webui/utils/oauth.py"
+    },
+    {
+      "source": "payload/open_webui/static/loader.js",
+      "target": "open_webui/static/loader.js"
+    },
+    {
+      "source": "payload/open_webui/frontend/static/loader.js",
+      "target": "open_webui/frontend/static/loader.js"
+    }
+  ],
+  "contains_checks": [
+    {
+      "label": "SSO UI endpoint",
+      "target": "open_webui/routers/auths.py",
+      "needle": "/admin/config/sso/ui"
+    },
+    {
+      "label": "OAuth redirect to root",
+      "target": "open_webui/utils/oauth.py",
+      "needle": "redirect_url = redirect_base_url or '/'"
+    },
+    {
+      "label": "PDF OCR loader",
+      "target": "open_webui/retrieval/loaders/main.py",
+      "needle": "class SmartPDFLoader"
+    },
+    {
+      "label": "Image OCR loader",
+      "target": "open_webui/retrieval/loaders/main.py",
+      "needle": "class RapidOCRImageLoader"
+    },
+    {
+      "label": "Settings loader shim",
+      "target": "open_webui/static/loader.js",
+      "needle": "owui-sso-height"
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+.scratch/
+patcher/backups/
+__pycache__/
+*.pyc
