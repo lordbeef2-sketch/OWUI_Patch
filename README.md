@@ -6,7 +6,7 @@ This package recreates the local OWUI changes we made for:
 
 - TWC OIDC sign-in flow that lands back in OWUI already logged in
 - `Admin Panel -> Settings -> SSO`
-- Langflow-style SSO field names for shared settings like `discovery_url` and `user_id_claim`
+- Workbench/TWC-style SSO field names such as `TWC_AUTH_CLIENT_ID`, `TWC_AUTH_CLIENT_SECRET`, `TWC_AUTH_SCOPE`, and `TWC_SAML_*`
 - left-sidebar `Workbench` bridge panel inside OWUI with per-user Workbench selectors
 - dropdown-based SSO claim mapping UI
 - native PDF extraction with Tesseract fallback for scanned pages
@@ -25,6 +25,8 @@ The GUI gives you three buttons:
 - `Install`: create `.venv`, install `open-webui==0.9.6`, then optionally patch it.
 - `Patch`: apply the TWC patch to an existing OWUI install.
 - `Launch`: start the patched OWUI server with the saved local config.
+
+The OWUI SSO panel intentionally mirrors the Workbench `.env` names for TWC AuthServer settings. The client secret field is `TWC_AUTH_CLIENT_SECRET`, with Workbench-compatible alias support for `TWC_AUTHENTICATION_CLIENT_SECRET`.
 
 CLI patch-only quick start:
 

@@ -21,6 +21,7 @@ from open_webui.config import (
     ENABLE_OAUTH_PERSISTENT_CONFIG,
     ENABLE_OAUTH_SIGNUP,
     ENABLE_PASSWORD_AUTH,
+    OAUTH_AUTO_REDIRECT,
     OAUTH_MERGE_ACCOUNTS_BY_EMAIL,
     OAUTH_PROVIDERS,
     OAUTH_CLIENT_ID,
@@ -37,6 +38,16 @@ from open_webui.config import (
     OPENID_END_SESSION_ENDPOINT,
     OPENID_PROVIDER_URL,
     OPENID_REDIRECT_URI,
+    TWC_AUTH_CLIENT_ID,
+    TWC_AUTH_CLIENT_SECRET,
+    TWC_AUTH_SCOPE,
+    TWC_AUTH_SERVER_OVERRIDES,
+    TWC_SAML_AUTHORIZE_URL,
+    TWC_SAML_LOGIN_PATH,
+    TWC_SAML_LOGIN_PORT,
+    TWC_SAML_RETURN_URL_PARAMETER,
+    TWC_SAML_TOKEN_PATH,
+    TWC_SAML_TOKEN_URL,
     load_oauth_providers,
 )
 from open_webui.constants import ERROR_MESSAGES, WEBHOOK_MESSAGES
@@ -1176,15 +1187,34 @@ def _compute_sso_callback_url(request: Request, redirect_uri: Optional[str] = No
 def _get_sso_config_payload(request: Request) -> dict:
     discovery_url = _normalize_optional_text(request.app.state.config.OPENID_PROVIDER_URL)
     user_id_claim = _normalize_optional_text(request.app.state.config.OAUTH_SUB_CLAIM) or 'sub'
+    twc_auth_client_id = _normalize_optional_text(request.app.state.config.TWC_AUTH_CLIENT_ID)
+    twc_auth_client_secret = _normalize_optional_text(request.app.state.config.TWC_AUTH_CLIENT_SECRET)
+    twc_auth_scope = _normalize_optional_text(request.app.state.config.TWC_AUTH_SCOPE) or 'openid'
     return {
+        'twc_auth_client_id': twc_auth_client_id,
+        'twc_auth_client_secret': twc_auth_client_secret,
+        'twc_auth_scope': twc_auth_scope,
+        'twc_saml_authorize_url': _normalize_optional_text(request.app.state.config.TWC_SAML_AUTHORIZE_URL),
+        'twc_saml_token_url': _normalize_optional_text(request.app.state.config.TWC_SAML_TOKEN_URL),
+        'twc_saml_login_path': _normalize_optional_text(request.app.state.config.TWC_SAML_LOGIN_PATH)
+        or '/authentication/authorize',
+        'twc_saml_login_port': _normalize_optional_text(str(request.app.state.config.TWC_SAML_LOGIN_PORT or '8443')),
+        'twc_saml_token_path': _normalize_optional_text(request.app.state.config.TWC_SAML_TOKEN_PATH)
+        or '/authentication/api/token',
+        'twc_saml_return_url_parameter': _normalize_optional_text(
+            request.app.state.config.TWC_SAML_RETURN_URL_PARAMETER
+        )
+        or 'redirect_uri',
+        'twc_auth_server_overrides': _normalize_optional_text(request.app.state.config.TWC_AUTH_SERVER_OVERRIDES)
+        or '{}',
         'discovery_url': discovery_url,
         'openid_provider_url': discovery_url,
         'provider_name': _normalize_optional_text(request.app.state.config.OAUTH_PROVIDER_NAME) or 'oidc',
-        'client_id': _normalize_optional_text(request.app.state.config.OAUTH_CLIENT_ID),
-        'client_secret': _normalize_optional_text(request.app.state.config.OAUTH_CLIENT_SECRET),
+        'client_id': _normalize_optional_text(request.app.state.config.OAUTH_CLIENT_ID) or twc_auth_client_id,
+        'client_secret': _normalize_optional_text(request.app.state.config.OAUTH_CLIENT_SECRET) or twc_auth_client_secret,
         'redirect_uri': _normalize_optional_text(request.app.state.config.OPENID_REDIRECT_URI),
         'computed_callback_url': _compute_sso_callback_url(request, request.app.state.config.OPENID_REDIRECT_URI),
-        'scopes': _normalize_optional_text(request.app.state.config.OAUTH_SCOPES) or 'openid email profile',
+        'scopes': _normalize_optional_text(request.app.state.config.OAUTH_SCOPES) or twc_auth_scope,
         'end_session_endpoint': _normalize_optional_text(request.app.state.config.OPENID_END_SESSION_ENDPOINT),
         'token_endpoint_auth_method': _normalize_optional_text(request.app.state.config.OAUTH_TOKEN_ENDPOINT_AUTH_METHOD),
         'code_challenge_method': _normalize_optional_text(request.app.state.config.OAUTH_CODE_CHALLENGE_METHOD),
@@ -1196,6 +1226,7 @@ def _get_sso_config_payload(request: Request) -> dict:
         'picture_claim': _normalize_optional_text(request.app.state.config.OAUTH_PICTURE_CLAIM) or 'picture',
         'groups_claim': _normalize_optional_text(request.app.state.config.OAUTH_GROUPS_CLAIM) or 'groups',
         'enable_oauth_signup': bool(request.app.state.config.ENABLE_OAUTH_SIGNUP),
+        'oauth_auto_redirect': bool(request.app.state.config.OAUTH_AUTO_REDIRECT),
         'merge_accounts_by_email': bool(request.app.state.config.OAUTH_MERGE_ACCOUNTS_BY_EMAIL),
         'enable_password_auth': bool(request.app.state.config.ENABLE_PASSWORD_AUTH),
         'oauth_persistent_config_enabled': bool(ENABLE_OAUTH_PERSISTENT_CONFIG),
@@ -1460,8 +1491,9 @@ def _build_sso_ui_html(request: Request) -> str:
       <div class="eyebrow">OWUI Authentication Patch</div>
       <h1>Configure the TWC OpenID Connect login flow for OWUI.</h1>
       <p class="lede">
-        This panel writes directly to Open WebUI's OIDC runtime settings. Use the discovery URL and one
-        matching callback registration on the TWC side so users land back in OWUI already signed in.
+        This panel uses the same TWC AuthServer variable names as Workbench, then maps them into
+        Open WebUI's runtime login settings. Register one matching callback on the TWC side so users
+        land back in OWUI already signed in.
       </p>
       <div class="meta-grid">
         <div class="meta-card">
@@ -1493,6 +1525,13 @@ def _build_sso_ui_html(request: Request) -> str:
           </label>
           <label class="toggle-row">
             <div class="label-block">
+              <strong>Auto Login With TWC</strong>
+              <span>When OWUI is not logged in and TWC is the only OAuth provider, redirect straight to TWC instead of showing the local login page.</span>
+            </div>
+            <div class="toggle-control"><input id="oauth_auto_redirect" type="checkbox"></div>
+          </label>
+          <label class="toggle-row">
+            <div class="label-block">
               <strong>Allow New SSO Sign Ups</strong>
               <span>Create OWUI users automatically the first time a valid TWC identity signs in.</span>
             </div>
@@ -1509,57 +1548,92 @@ def _build_sso_ui_html(request: Request) -> str:
       </section>
 
       <section class="section">
-        <h2>OpenID Connect</h2>
-        <p class="section-copy">These fields define how OWUI talks to the TWC authorization server.</p>
+        <h2>TWC AuthServer</h2>
+        <p class="section-copy">These fields intentionally mirror the Workbench `.env` names.</p>
         <div class="row-grid">
           <label class="field-row">
             <div class="label-block">
-              <strong>Discovery URL</strong>
-              <span>Paste the TWC discovery document URL, usually the <code>.well-known/openid-configuration</code> endpoint.</span>
+              <strong>TWC_AUTH_CLIENT_ID</strong>
+              <span>One client id listed in TWC <code>authentication.client.ids</code>.</span>
+            </div>
+            <div class="field-stack"><input id="twc_auth_client_id" type="text" autocomplete="off"></div>
+          </label>
+          <label class="field-row">
+            <div class="label-block">
+              <strong>TWC_AUTH_CLIENT_SECRET</strong>
+              <span>The TWC <code>authentication.client.secret</code> value. Workbench sends this as <code>X-Auth-Secret</code>.</span>
+            </div>
+            <div class="field-stack"><input id="twc_auth_client_secret" type="password" autocomplete="new-password"></div>
+          </label>
+          <label class="field-row">
+            <div class="label-block">
+              <strong>TWC_AUTH_SCOPE</strong>
+              <span>Workbench defaults this to <code>openid</code>. Change only if your TWC AuthServer registration requires another scope.</span>
+            </div>
+            <div class="field-stack"><input id="twc_auth_scope" type="text" autocomplete="off"></div>
+          </label>
+          <label class="field-row">
+            <div class="label-block">
+              <strong>TWC_SAML_AUTHORIZE_URL</strong>
+              <span>Optional complete authorize URL. Leave blank to derive <code>https://&lt;twc-host&gt;:8443/authentication/authorize</code>.</span>
+            </div>
+            <div class="field-stack"><input id="twc_saml_authorize_url" type="text" autocomplete="off"></div>
+          </label>
+          <label class="field-row">
+            <div class="label-block">
+              <strong>TWC_SAML_TOKEN_URL</strong>
+              <span>Optional complete token URL. Leave blank to derive <code>/authentication/api/token</code>.</span>
+            </div>
+            <div class="field-stack"><input id="twc_saml_token_url" type="text" autocomplete="off"></div>
+          </label>
+          <label class="field-row">
+            <div class="label-block">
+              <strong>TWC_SAML_LOGIN_PATH</strong>
+              <span>Used only when the authorize URL is blank.</span>
+            </div>
+            <div class="field-stack"><input id="twc_saml_login_path" type="text" autocomplete="off"></div>
+          </label>
+          <label class="field-row">
+            <div class="label-block">
+              <strong>TWC_SAML_LOGIN_PORT</strong>
+              <span>Used only when the authorize URL is blank.</span>
+            </div>
+            <div class="field-stack"><input id="twc_saml_login_port" type="text" autocomplete="off"></div>
+          </label>
+          <label class="field-row">
+            <div class="label-block">
+              <strong>TWC_SAML_TOKEN_PATH</strong>
+              <span>Used only when the token URL is blank.</span>
+            </div>
+            <div class="field-stack"><input id="twc_saml_token_path" type="text" autocomplete="off"></div>
+          </label>
+          <label class="field-row">
+            <div class="label-block">
+              <strong>TWC_SAML_RETURN_URL_PARAMETER</strong>
+              <span>Workbench defaults this to <code>redirect_uri</code>.</span>
+            </div>
+            <div class="field-stack"><input id="twc_saml_return_url_parameter" type="text" autocomplete="off"></div>
+          </label>
+          <label class="field-row">
+            <div class="label-block">
+              <strong>TWC_AUTH_SERVER_OVERRIDES</strong>
+              <span>Optional JSON object keyed by preset/server id, matching Workbench.</span>
+            </div>
+            <div class="field-stack"><input id="twc_auth_server_overrides" type="text" autocomplete="off"></div>
+          </label>
+          <label class="field-row">
+            <div class="label-block">
+              <strong>OWUI Discovery URL</strong>
+              <span>Optional compatibility field for OWUI's built-in OIDC client. Leave blank if the dedicated TWC authorize/token fields are used later.</span>
             </div>
             <div class="field-stack"><input id="discovery_url" type="text" autocomplete="off"></div>
           </label>
           <label class="field-row">
             <div class="label-block">
-              <strong>Provider Label</strong>
-              <span>This is the user-facing name OWUI shows for the SSO button and provider listing.</span>
-            </div>
-            <div class="field-stack"><input id="provider_name" type="text" autocomplete="off"></div>
-          </label>
-          <label class="field-row">
-            <div class="label-block">
-              <strong>Client ID</strong>
-              <span>The client identifier registered on the TWC authentication server.</span>
-            </div>
-            <div class="field-stack"><input id="client_id" type="text" autocomplete="off"></div>
-          </label>
-          <label class="field-row">
-            <div class="label-block">
-              <strong>Client Secret</strong>
-              <span>Leave this blank only if your TWC application genuinely uses a public-client flow.</span>
-            </div>
-            <div class="field-stack"><input id="client_secret" type="password" autocomplete="new-password"></div>
-          </label>
-          <label class="field-row">
-            <div class="label-block">
-              <strong>Redirect URI Override</strong>
+              <strong>OWUI Redirect URI Override</strong>
               <span>Leave empty to use the standard callback OWUI computes from its base URL.</span>
             </div>
             <div class="field-stack"><input id="redirect_uri" type="text" autocomplete="off"></div>
-          </label>
-          <label class="field-row">
-            <div class="label-block">
-              <strong>Scopes</strong>
-              <span>Keep at least <code>openid email profile</code> unless TWC needs a different scope string.</span>
-            </div>
-            <div class="field-stack"><input id="scopes" type="text" autocomplete="off"></div>
-          </label>
-          <label class="field-row">
-            <div class="label-block">
-              <strong>Logout Endpoint</strong>
-              <span>Optional. Set this only if TWC exposes an end-session endpoint that should run during sign-out.</span>
-            </div>
-            <div class="field-stack"><input id="end_session_endpoint" type="text" autocomplete="off"></div>
           </label>
         </div>
       </section>
@@ -1752,14 +1826,20 @@ def _build_sso_ui_html(request: Request) -> str:
       };
 
       const fillForm = (config) => {
+        document.getElementById('twc_auth_client_id').value = config.twc_auth_client_id || config.client_id || '';
+        document.getElementById('twc_auth_client_secret').value = config.twc_auth_client_secret || config.client_secret || '';
+        document.getElementById('twc_auth_scope').value = config.twc_auth_scope || config.scopes || 'openid';
+        document.getElementById('twc_saml_authorize_url').value = config.twc_saml_authorize_url || '';
+        document.getElementById('twc_saml_token_url').value = config.twc_saml_token_url || '';
+        document.getElementById('twc_saml_login_path').value = config.twc_saml_login_path || '/authentication/authorize';
+        document.getElementById('twc_saml_login_port').value = config.twc_saml_login_port || '8443';
+        document.getElementById('twc_saml_token_path').value = config.twc_saml_token_path || '/authentication/api/token';
+        document.getElementById('twc_saml_return_url_parameter').value = config.twc_saml_return_url_parameter || 'redirect_uri';
+        document.getElementById('twc_auth_server_overrides').value = config.twc_auth_server_overrides || '{}';
         document.getElementById('discovery_url').value = config.discovery_url || config.openid_provider_url || '';
-        document.getElementById('provider_name').value = config.provider_name || 'oidc';
-        document.getElementById('client_id').value = config.client_id || '';
-        document.getElementById('client_secret').value = config.client_secret || '';
         document.getElementById('redirect_uri').value = config.redirect_uri || '';
-        document.getElementById('scopes').value = config.scopes || 'openid email profile';
-        document.getElementById('end_session_endpoint').value = config.end_session_endpoint || '';
         document.getElementById('enable_oauth_signup').checked = !!config.enable_oauth_signup;
+        document.getElementById('oauth_auto_redirect').checked = !!config.oauth_auto_redirect;
         document.getElementById('merge_accounts_by_email').checked = !!config.merge_accounts_by_email;
         document.getElementById('enable_password_auth').checked = !!config.enable_password_auth;
 
@@ -1777,13 +1857,18 @@ def _build_sso_ui_html(request: Request) -> str:
       };
 
       const buildPayload = () => ({
+        twc_auth_client_id: document.getElementById('twc_auth_client_id').value.trim(),
+        twc_auth_client_secret: document.getElementById('twc_auth_client_secret').value,
+        twc_auth_scope: document.getElementById('twc_auth_scope').value.trim(),
+        twc_saml_authorize_url: document.getElementById('twc_saml_authorize_url').value.trim(),
+        twc_saml_token_url: document.getElementById('twc_saml_token_url').value.trim(),
+        twc_saml_login_path: document.getElementById('twc_saml_login_path').value.trim(),
+        twc_saml_login_port: document.getElementById('twc_saml_login_port').value.trim(),
+        twc_saml_token_path: document.getElementById('twc_saml_token_path').value.trim(),
+        twc_saml_return_url_parameter: document.getElementById('twc_saml_return_url_parameter').value.trim(),
+        twc_auth_server_overrides: document.getElementById('twc_auth_server_overrides').value.trim(),
         discovery_url: document.getElementById('discovery_url').value.trim(),
-        provider_name: document.getElementById('provider_name').value.trim(),
-        client_id: document.getElementById('client_id').value.trim(),
-        client_secret: document.getElementById('client_secret').value,
         redirect_uri: document.getElementById('redirect_uri').value.trim(),
-        scopes: document.getElementById('scopes').value.trim(),
-        end_session_endpoint: document.getElementById('end_session_endpoint').value.trim(),
         token_endpoint_auth_method: readSelectValue('token_endpoint_auth_method'),
         code_challenge_method: readSelectValue('code_challenge_method'),
         user_id_claim: readSelectValue('user_id_claim'),
@@ -1792,6 +1877,7 @@ def _build_sso_ui_html(request: Request) -> str:
         picture_claim: readSelectValue('picture_claim'),
         groups_claim: readSelectValue('groups_claim'),
         enable_oauth_signup: document.getElementById('enable_oauth_signup').checked,
+        oauth_auto_redirect: document.getElementById('oauth_auto_redirect').checked,
         merge_accounts_by_email: document.getElementById('merge_accounts_by_email').checked,
         enable_password_auth: document.getElementById('enable_password_auth').checked,
       });
@@ -1880,6 +1966,16 @@ def _build_sso_ui_html(request: Request) -> str:
 
 
 class SSOConfigForm(BaseModel):
+    twc_auth_client_id: str = ''
+    twc_auth_client_secret: str = ''
+    twc_auth_scope: str = 'openid'
+    twc_saml_authorize_url: str = ''
+    twc_saml_token_url: str = ''
+    twc_saml_login_path: str = '/authentication/authorize'
+    twc_saml_login_port: str = '8443'
+    twc_saml_token_path: str = '/authentication/api/token'
+    twc_saml_return_url_parameter: str = 'redirect_uri'
+    twc_auth_server_overrides: str = '{}'
     discovery_url: str = ''
     openid_provider_url: str = ''
     provider_name: str = 'oidc'
@@ -1897,6 +1993,7 @@ class SSOConfigForm(BaseModel):
     picture_claim: str = 'picture'
     groups_claim: str = 'groups'
     enable_oauth_signup: bool = False
+    oauth_auto_redirect: bool = False
     merge_accounts_by_email: bool = False
     enable_password_auth: bool = True
 
@@ -1912,13 +2009,39 @@ async def update_sso_config(request: Request, form_data: SSOConfigForm, user=Dep
         form_data.openid_provider_url
     )
     user_id_claim = _normalize_optional_text(form_data.user_id_claim) or _normalize_optional_text(form_data.sub_claim)
+    twc_auth_client_id = _normalize_optional_text(form_data.twc_auth_client_id) or _normalize_optional_text(
+        form_data.client_id
+    )
+    twc_auth_client_secret = _normalize_optional_text(form_data.twc_auth_client_secret) or _normalize_optional_text(
+        form_data.client_secret
+    )
+    twc_auth_scope = _normalize_optional_text(form_data.twc_auth_scope) or _normalize_optional_text(form_data.scopes)
+    twc_auth_scope = twc_auth_scope or 'openid'
 
+    request.app.state.config.TWC_AUTH_CLIENT_ID = twc_auth_client_id
+    request.app.state.config.TWC_AUTH_CLIENT_SECRET = twc_auth_client_secret
+    request.app.state.config.TWC_AUTH_SCOPE = twc_auth_scope
+    request.app.state.config.TWC_SAML_AUTHORIZE_URL = _normalize_optional_text(form_data.twc_saml_authorize_url)
+    request.app.state.config.TWC_SAML_TOKEN_URL = _normalize_optional_text(form_data.twc_saml_token_url)
+    request.app.state.config.TWC_SAML_LOGIN_PATH = (
+        _normalize_optional_text(form_data.twc_saml_login_path) or '/authentication/authorize'
+    )
+    request.app.state.config.TWC_SAML_LOGIN_PORT = _normalize_optional_text(form_data.twc_saml_login_port) or '8443'
+    request.app.state.config.TWC_SAML_TOKEN_PATH = (
+        _normalize_optional_text(form_data.twc_saml_token_path) or '/authentication/api/token'
+    )
+    request.app.state.config.TWC_SAML_RETURN_URL_PARAMETER = (
+        _normalize_optional_text(form_data.twc_saml_return_url_parameter) or 'redirect_uri'
+    )
+    request.app.state.config.TWC_AUTH_SERVER_OVERRIDES = (
+        _normalize_optional_text(form_data.twc_auth_server_overrides) or '{}'
+    )
     request.app.state.config.OPENID_PROVIDER_URL = discovery_url
     request.app.state.config.OAUTH_PROVIDER_NAME = _normalize_optional_text(form_data.provider_name) or 'oidc'
-    request.app.state.config.OAUTH_CLIENT_ID = _normalize_optional_text(form_data.client_id)
-    request.app.state.config.OAUTH_CLIENT_SECRET = _normalize_optional_text(form_data.client_secret)
+    request.app.state.config.OAUTH_CLIENT_ID = twc_auth_client_id
+    request.app.state.config.OAUTH_CLIENT_SECRET = twc_auth_client_secret
     request.app.state.config.OPENID_REDIRECT_URI = _normalize_optional_text(form_data.redirect_uri)
-    request.app.state.config.OAUTH_SCOPES = _normalize_optional_text(form_data.scopes) or 'openid email profile'
+    request.app.state.config.OAUTH_SCOPES = twc_auth_scope
     request.app.state.config.OPENID_END_SESSION_ENDPOINT = _normalize_optional_text(form_data.end_session_endpoint)
     request.app.state.config.OAUTH_TOKEN_ENDPOINT_AUTH_METHOD = _normalize_optional_text(
         form_data.token_endpoint_auth_method
@@ -1932,6 +2055,7 @@ async def update_sso_config(request: Request, form_data: SSOConfigForm, user=Dep
     request.app.state.config.OAUTH_PICTURE_CLAIM = _normalize_optional_text(form_data.picture_claim) or 'picture'
     request.app.state.config.OAUTH_GROUPS_CLAIM = _normalize_optional_text(form_data.groups_claim) or 'groups'
     request.app.state.config.ENABLE_OAUTH_SIGNUP = form_data.enable_oauth_signup
+    request.app.state.config.OAUTH_AUTO_REDIRECT = form_data.oauth_auto_redirect
     request.app.state.config.OAUTH_MERGE_ACCOUNTS_BY_EMAIL = form_data.merge_accounts_by_email
     request.app.state.config.ENABLE_PASSWORD_AUTH = form_data.enable_password_auth
 

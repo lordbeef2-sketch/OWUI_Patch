@@ -233,6 +233,10 @@
 
     try {
       const config = await getAppConfig();
+      if (!(((config || {}).oauth || {}).auto_redirect)) {
+        return;
+      }
+
       const providers = Object.keys(((config || {}).oauth || {}).providers || {});
       if (providers.length !== 1) {
         return;

@@ -3469,6 +3469,73 @@ OAUTH_MERGE_ACCOUNTS_BY_EMAIL = ConfigVar(
 
 OAUTH_PROVIDERS = {}
 
+####################################
+# TWC AuthServer compatibility config
+####################################
+
+TWC_AUTH_CLIENT_ID = ConfigVar(
+    'TWC_AUTH_CLIENT_ID',
+    'twc.auth.client_id',
+    os.getenv(
+        'TWC_AUTH_CLIENT_ID',
+        os.getenv('TWC_AUTHENTICATION_CLIENT_ID', os.getenv('TWC_AUTHENTICATION_CLIENT_IDS', '')),
+    ),
+)
+
+TWC_AUTH_CLIENT_SECRET = ConfigVar(
+    'TWC_AUTH_CLIENT_SECRET',
+    'twc.auth.client_secret',
+    os.getenv('TWC_AUTH_CLIENT_SECRET', os.getenv('TWC_AUTHENTICATION_CLIENT_SECRET', '')),
+)
+
+TWC_AUTH_SCOPE = ConfigVar(
+    'TWC_AUTH_SCOPE',
+    'twc.auth.scope',
+    os.getenv('TWC_AUTH_SCOPE', 'openid'),
+)
+
+TWC_SAML_AUTHORIZE_URL = ConfigVar(
+    'TWC_SAML_AUTHORIZE_URL',
+    'twc.auth.authorize_url',
+    os.getenv('TWC_SAML_AUTHORIZE_URL', ''),
+)
+
+TWC_SAML_TOKEN_URL = ConfigVar(
+    'TWC_SAML_TOKEN_URL',
+    'twc.auth.token_url',
+    os.getenv('TWC_SAML_TOKEN_URL', ''),
+)
+
+TWC_SAML_LOGIN_PATH = ConfigVar(
+    'TWC_SAML_LOGIN_PATH',
+    'twc.auth.login_path',
+    os.getenv('TWC_SAML_LOGIN_PATH', '/authentication/authorize'),
+)
+
+TWC_SAML_LOGIN_PORT = ConfigVar(
+    'TWC_SAML_LOGIN_PORT',
+    'twc.auth.login_port',
+    os.getenv('TWC_SAML_LOGIN_PORT', '8443'),
+)
+
+TWC_SAML_TOKEN_PATH = ConfigVar(
+    'TWC_SAML_TOKEN_PATH',
+    'twc.auth.token_path',
+    os.getenv('TWC_SAML_TOKEN_PATH', '/authentication/api/token'),
+)
+
+TWC_SAML_RETURN_URL_PARAMETER = ConfigVar(
+    'TWC_SAML_RETURN_URL_PARAMETER',
+    'twc.auth.return_url_parameter',
+    os.getenv('TWC_SAML_RETURN_URL_PARAMETER', 'redirect_uri'),
+)
+
+TWC_AUTH_SERVER_OVERRIDES = ConfigVar(
+    'TWC_AUTH_SERVER_OVERRIDES',
+    'twc.auth.server_overrides',
+    os.getenv('TWC_AUTH_SERVER_OVERRIDES', '{}'),
+)
+
 GOOGLE_CLIENT_ID = ConfigVar(
     'GOOGLE_CLIENT_ID',
     'oauth.google.client_id',
@@ -3579,13 +3646,13 @@ GITHUB_CLIENT_REDIRECT_URI = ConfigVar(
 OAUTH_CLIENT_ID = ConfigVar(
     'OAUTH_CLIENT_ID',
     'oauth.oidc.client_id',
-    os.getenv('OAUTH_CLIENT_ID', ''),
+    os.getenv('OAUTH_CLIENT_ID', TWC_AUTH_CLIENT_ID.value),
 )
 
 OAUTH_CLIENT_SECRET = ConfigVar(
     'OAUTH_CLIENT_SECRET',
     'oauth.oidc.client_secret',
-    os.getenv('OAUTH_CLIENT_SECRET', ''),
+    os.getenv('OAUTH_CLIENT_SECRET', TWC_AUTH_CLIENT_SECRET.value),
 )
 
 OPENID_PROVIDER_URL = ConfigVar(
@@ -3609,7 +3676,7 @@ OPENID_REDIRECT_URI = ConfigVar(
 OAUTH_SCOPES = ConfigVar(
     'OAUTH_SCOPES',
     'oauth.oidc.scopes',
-    os.getenv('OAUTH_SCOPES', 'openid email profile'),
+    os.getenv('OAUTH_SCOPES', TWC_AUTH_SCOPE.value or 'openid'),
 )
 
 OAUTH_TIMEOUT = ConfigVar(

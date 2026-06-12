@@ -47,7 +47,8 @@ If you run the patcher from an Open WebUI root that already has a local `.venv`,
 - cookie-backed session restore so the returned user is already logged in
 - automatic redirect to the sole configured OAuth provider
 - `Admin Panel -> Settings -> SSO`
-- Langflow-matching SSO field names in the admin editor for shared concepts like `discovery_url`, `provider_name`, `client_id`, `redirect_uri`, and `user_id_claim`
+- Workbench/TWC-matching SSO field names in the admin editor, including `TWC_AUTH_CLIENT_ID`, `TWC_AUTH_CLIENT_SECRET`, `TWC_AUTH_SCOPE`, `TWC_SAML_*`, and `TWC_AUTH_SERVER_OVERRIDES`
+- an `Auto Login With TWC` toggle backed by OWUI's `OAUTH_AUTO_REDIRECT`
 - left-sidebar `Workbench` bridge panel that keeps OWUI as the main chat surface
 - full-height SSO settings page
 - dropdown-first SSO claim mapping UI with custom fallback fields
