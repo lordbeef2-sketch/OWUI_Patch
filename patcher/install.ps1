@@ -24,6 +24,58 @@ function Get-FileHashHex([string]$Path) {
   return (Get-FileHash -Algorithm SHA256 -Path $Path).Hash.ToLowerInvariant()
 }
 
+function Get-DependencyImportName([string]$PackageName) {
+  switch ($PackageName.ToLowerInvariant()) {
+    'pillow' { return 'PIL' }
+    'pymupdf' { return 'fitz' }
+    default { return $PackageName }
+  }
+}
+
+function Get-MissingDependencies([string]$PythonPath, $Dependencies) {
+  $pythonScript = @'
+import importlib
+import json
+import sys
+
+payload = json.loads(sys.stdin.read())
+missing = []
+for entry in payload:
+    module_name = entry["module"]
+    try:
+        importlib.import_module(module_name)
+    except Exception:
+        missing.append(entry["package"])
+print(json.dumps(missing))
+'@
+
+  $payload = @()
+  foreach ($dependency in $Dependencies) {
+    $payload += @{
+      package = [string]$dependency
+      module = (Get-DependencyImportName -PackageName ([string]$dependency))
+    }
+  }
+
+  $jsonPayload = $payload | ConvertTo-Json
+  $result = $jsonPayload | & $PythonPath -c $pythonScript
+  if ($LASTEXITCODE -ne 0) {
+    Warn "Could not verify installed dependency imports ahead of time. Falling back to installer flow."
+    return @($Dependencies)
+  }
+
+  try {
+    $parsed = ($result -join "`n" | ConvertFrom-Json)
+    if ($null -eq $parsed) {
+      return @()
+    }
+    return @($parsed)
+  } catch {
+    Warn "Dependency import check returned unreadable output. Falling back to installer flow."
+    return @($Dependencies)
+  }
+}
+
 function Test-PipAvailable([string]$PythonPath) {
   & $PythonPath -m pip --version *> $null
   if ($LASTEXITCODE -eq 0) {
@@ -159,10 +211,23 @@ if (-not $SkipDependencyInstall -and $CanPrompt) {
 }
 
 if ($InstallDependencies -and $Manifest.dependencies.Count -gt 0) {
-  Info "Installing patch dependencies"
-  $dependencyExitCode = Install-PatcherDependencies -TargetPythonPath $PythonPath -SitePackagesPath $SitePackagesRoot -Dependencies $Manifest.dependencies
-  if ($dependencyExitCode -ne 0) {
-    Fail "Dependency installation failed"
+  $missingDependencies = @(Get-MissingDependencies -PythonPath $PythonPath -Dependencies $Manifest.dependencies)
+  if ($missingDependencies.Count -eq 0) {
+    Ok "Python OCR dependencies are already installed"
+  } else {
+    Info ("Installing patch dependencies: {0}" -f ($missingDependencies -join ', '))
+    $dependencyExitCode = Install-PatcherDependencies -TargetPythonPath $PythonPath -SitePackagesPath $SitePackagesRoot -Dependencies $missingDependencies
+    if ($dependencyExitCode -ne 0) {
+      Fail "Dependency installation failed"
+    }
+
+    $remainingMissingDependencies = @(Get-MissingDependencies -PythonPath $PythonPath -Dependencies $missingDependencies)
+    if ($remainingMissingDependencies.Count -gt 0) {
+      $remainingList = $remainingMissingDependencies -join ', '
+      Fail ("Dependency installation completed but these imports are still missing: {0}" -f $remainingList)
+    }
+
+    Ok "Python OCR dependencies are installed"
   }
 } else {
   Warn "Skipping dependency installation"

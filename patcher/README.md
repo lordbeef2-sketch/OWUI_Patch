@@ -55,7 +55,7 @@ The installer:
 - opens a Windows folder picker only if no usable OWUI install is found relative to `patcher`
 - auto-detects Tesseract without interrupting the install; pass `-TesseractExe` to override it
 - verifies the target Open WebUI version is `0.9.6` unless you use `-SkipVersionCheck`
-- installs Python OCR dependencies
+- checks whether the Python OCR dependencies are already importable and only installs the missing ones
 - backs up every replaced file under `patcher\backups\...`
 - copies the patched payload into the target `site-packages\open_webui`
 
