@@ -1,7 +1,10 @@
 param(
+  [string]$OpenWebUiTarget = "",
   [string]$PythonExe = "",
+  [string]$TesseractExe = "",
   [switch]$SkipDependencyInstall,
-  [switch]$SkipVersionCheck
+  [switch]$SkipVersionCheck,
+  [switch]$NonInteractive
 )
 
 $PatcherRoot = Split-Path -Parent $MyInvocation.MyCommand.Path

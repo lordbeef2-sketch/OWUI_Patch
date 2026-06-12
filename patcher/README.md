@@ -22,6 +22,8 @@ You can use it in either of these ways:
 1. Keep this repo anywhere and point it at an OWUI Python environment with `-PythonExe`.
 2. Drop the `patcher` folder inside an OWUI root that already has `.venv`, then run `install.ps1` with no arguments.
 
+The patcher now saves your chosen Open WebUI target, Python path, Tesseract path, and launcher host/port in `patcher\local.settings.json` so follow-up commands reuse the same machine-local answers.
+
 ## What it patches
 
 - OWUI OIDC callback redirect back to `/` instead of `/auth`
@@ -44,28 +46,36 @@ You can use it in either of these ways:
 Or:
 
 ```powershell
-.\patcher\install.ps1 -PythonExe C:\path\to\python.exe
+.\patcher\install.ps1 -OpenWebUiTarget C:\path\to\OpenWebUI
 ```
 
 The installer:
 
+- prompts for the OWUI install location instead of assuming one
+- lets you confirm or override the Tesseract executable path
 - verifies the target Open WebUI version is `0.9.2` unless you use `-SkipVersionCheck`
 - installs Python OCR dependencies
 - backs up every replaced file under `patcher\backups\...`
 - copies the patched payload into the target `site-packages\open_webui`
+
+You can still run fully unattended with explicit flags:
+
+```powershell
+.\patcher\install.ps1 -PythonExe C:\path\to\python.exe -TesseractExe C:\Program Files\Tesseract-OCR\tesseract.exe -NonInteractive
+```
 
 Tesseract itself is not bundled by this patcher. The target machine should already have a local `tesseract` binary on `PATH`, or you should set `TESSERACT_CMD` to the full executable path before starting Open WebUI.
 
 ## Check
 
 ```powershell
-.\patcher\status.ps1 -PythonExe C:\path\to\python.exe
+.\patcher\status.ps1
 ```
 
 ## Restore
 
 ```powershell
-.\patcher\restore.ps1 -PythonExe C:\path\to\python.exe
+.\patcher\restore.ps1
 ```
 
 If you omit `-BackupName`, the latest backup is restored.
@@ -84,3 +94,5 @@ That helper sets:
 - `PDF_EXTRACT_IMAGES=true`
 
 before launching `open-webui serve`.
+
+If `open-webui.exe` is not present next to the selected Python runtime, the helper falls back to `python -m open_webui serve`.

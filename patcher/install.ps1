@@ -1,91 +1,17 @@
 param(
+  [string]$OpenWebUiTarget = "",
   [string]$PythonExe = "",
+  [string]$TesseractExe = "",
   [switch]$SkipDependencyInstall,
-  [switch]$SkipVersionCheck
+  [switch]$SkipVersionCheck,
+  [switch]$NonInteractive
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-function Info([string]$msg) { Write-Host "[patcher] $msg" -ForegroundColor Cyan }
-function Ok([string]$msg) { Write-Host "[patcher] $msg" -ForegroundColor Green }
-function Warn([string]$msg) { Write-Host "[patcher] $msg" -ForegroundColor Yellow }
-function Fail([string]$msg) { Write-Host "[patcher] $msg" -ForegroundColor Red; exit 1 }
-
-function Resolve-Tesseract {
-  if ($env:TESSERACT_CMD -and (Test-Path $env:TESSERACT_CMD)) {
-    return (Resolve-Path $env:TESSERACT_CMD).Path
-  }
-
-  $tesseractCmd = Get-Command tesseract -ErrorAction SilentlyContinue | Select-Object -First 1
-  if ($tesseractCmd) {
-    return $tesseractCmd.Source
-  }
-
-  $commonPaths = @(
-    "C:\Program Files\Tesseract-OCR\tesseract.exe",
-    "C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"
-  )
-  foreach ($candidate in $commonPaths) {
-    if (Test-Path $candidate) {
-      return (Resolve-Path $candidate).Path
-    }
-  }
-
-  return $null
-}
-
-function Resolve-Python([string]$Root, [string]$RequestedPython) {
-  if ($RequestedPython) {
-    if (-not (Test-Path $RequestedPython)) {
-      Fail ("Python executable not found: {0}" -f $RequestedPython)
-    }
-    return (Resolve-Path $RequestedPython).Path
-  }
-
-  $localVenvPython = Join-Path $Root ".venv\Scripts\python.exe"
-  if (Test-Path $localVenvPython) {
-    return (Resolve-Path $localVenvPython).Path
-  }
-
-  $pythonCmd = Get-Command python -ErrorAction SilentlyContinue | Select-Object -First 1
-  if ($pythonCmd) {
-    return $pythonCmd.Source
-  }
-
-  Fail "No Python executable found. Pass -PythonExe or place patcher inside an OWUI root that has .venv."
-}
-
-function Get-InstallInfo([string]$PythonPath) {
-  $script = @'
-import json
-import pathlib
-import sys
-import importlib.metadata
-
-import open_webui
-
-package_root = pathlib.Path(open_webui.__file__).resolve().parent
-try:
-    version = importlib.metadata.version("open-webui")
-except Exception:
-    version = ""
-
-print(json.dumps({
-    "python": sys.executable,
-    "package_root": str(package_root),
-    "site_packages": str(package_root.parent),
-    "version": version,
-}))
-'@
-
-  $json = $script | & $PythonPath -
-  if ($LASTEXITCODE -ne 0) {
-    Fail ("Failed to inspect Open WebUI install using {0}" -f $PythonPath)
-  }
-
-  return ($json | ConvertFrom-Json)
-}
+$PatcherRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $PatcherRoot 'common.ps1')
 
 function Ensure-ParentDirectory([string]$Path) {
   $parent = Split-Path -Parent $Path
@@ -98,7 +24,6 @@ function Get-FileHashHex([string]$Path) {
   return (Get-FileHash -Algorithm SHA256 -Path $Path).Hash.ToLowerInvariant()
 }
 
-$PatcherRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Root = (Resolve-Path (Join-Path $PatcherRoot '..')).Path
 $ManifestPath = Join-Path $PatcherRoot 'patch_manifest.json'
 
@@ -107,26 +32,62 @@ if (-not (Test-Path $ManifestPath)) {
 }
 
 $Manifest = Get-Content -Path $ManifestPath -Raw | ConvertFrom-Json
-$PythonPath = Resolve-Python -Root $Root -RequestedPython $PythonExe
-$InstallInfo = Get-InstallInfo -PythonPath $PythonPath
+$SavedConfig = Load-PatcherConfig -PatcherRoot $PatcherRoot
+$CanPrompt = (Get-IsInteractiveSession) -and (-not $NonInteractive)
+$ConfirmOwuiTarget = $CanPrompt -and (-not $OpenWebUiTarget) -and (-not $PythonExe)
+$ConfirmTesseract = $CanPrompt -and (-not $TesseractExe)
+
+$ResolvedOwui = Resolve-OpenWebUiTarget `
+  -PatcherRoot $PatcherRoot `
+  -RequestedTarget $OpenWebUiTarget `
+  -RequestedPython $PythonExe `
+  -SavedConfig $SavedConfig `
+  -AllowPrompt:$CanPrompt `
+  -PromptForConfirmation:$ConfirmOwuiTarget
+
+$InstallInfo = $ResolvedOwui.InstallInfo
+$PythonPath = $ResolvedOwui.PythonPath
 $SitePackagesRoot = $InstallInfo.site_packages
-$TesseractPath = Resolve-Tesseract
 $DetectedVersion = if ($null -ne $InstallInfo.version -and [string]$InstallInfo.version -ne "") { [string]$InstallInfo.version } else { "<unknown>" }
+$TesseractPath = Resolve-TesseractPath `
+  -PatcherRoot $PatcherRoot `
+  -RequestedPath $TesseractExe `
+  -SavedConfig $SavedConfig `
+  -AllowPrompt:$CanPrompt `
+  -PromptForConfirmation:$ConfirmTesseract `
+  -Optional
+$ConfigOwuiTarget = if ($OpenWebUiTarget) {
+  $OpenWebUiTarget
+} elseif ($PythonExe) {
+  $PythonExe
+} else {
+  $ResolvedOwui.SelectedInput
+}
 
 Info ("Using Python: {0}" -f $InstallInfo.python)
 Info ("Detected Open WebUI package root: {0}" -f $InstallInfo.package_root)
 Info ("Detected Open WebUI version: {0}" -f $DetectedVersion)
 if ($TesseractPath) {
-  Info ("Detected Tesseract: {0}" -f $TesseractPath)
+  Info ("Using Tesseract: {0}" -f $TesseractPath)
 } else {
-  Warn "Tesseract binary was not found. OCR will stay unavailable until tesseract is on PATH or TESSERACT_CMD is set."
+  Warn "Tesseract was skipped or not found. OCR stays unavailable until TESSERACT_CMD is configured at runtime."
 }
 
 if (-not $SkipVersionCheck -and $Manifest.target_version -and ($InstallInfo.version -ne $Manifest.target_version)) {
-  Fail ("This patcher targets Open WebUI {0}, but found {1}. Use -SkipVersionCheck only if you already validated the file layout." -f $Manifest.target_version, $InstallInfo.version)
+  $message = "This patcher targets Open WebUI {0}, but found {1}." -f $Manifest.target_version, $InstallInfo.version
+  if ($CanPrompt -and (Read-YesNoPrompt -Prompt ($message + " Continue anyway?") -DefaultValue:$false)) {
+    Warn "Continuing with version check bypassed for this run."
+  } else {
+    Fail ($message + " Use -SkipVersionCheck only if you already validated the file layout.")
+  }
 }
 
-if (-not $SkipDependencyInstall -and $Manifest.dependencies.Count -gt 0) {
+$InstallDependencies = -not $SkipDependencyInstall
+if (-not $SkipDependencyInstall -and $CanPrompt) {
+  $InstallDependencies = Read-YesNoPrompt -Prompt "Install or update Python OCR dependencies now?" -DefaultValue:$true
+}
+
+if ($InstallDependencies -and $Manifest.dependencies.Count -gt 0) {
   Info "Installing patch dependencies"
   & $PythonPath -m pip install --disable-pip-version-check @($Manifest.dependencies)
   if ($LASTEXITCODE -ne 0) {
@@ -172,7 +133,7 @@ foreach ($entry in $Manifest.files) {
     continue
   }
 
-  if ((Get-FileHashHex $src) -ne (Get-FileHashHex $dst)) {
+  if ((Get-FileHashHex -Path $src) -ne (Get-FileHashHex -Path $dst)) {
     $mismatches += $entry.target
   }
 }
@@ -182,10 +143,20 @@ if ($mismatches.Count -gt 0) {
   Fail ("Patch verification failed. Mismatched files:`n{0}" -f $list)
 }
 
+$configPath = Save-PatcherConfig -PatcherRoot $PatcherRoot -Updates @{
+  owui_target = $ConfigOwuiTarget
+  python_exe = $PythonPath
+  tesseract_exe = $TesseractPath
+}
+
 Ok ("Patched {0} files" -f $copied)
 Ok ("Backup created at {0}" -f $backupDir)
+Ok ("Saved local patcher defaults to {0}" -f $configPath)
 Write-Host ""
 Write-Host "Next:" -ForegroundColor White
 Write-Host "  1. Restart Open WebUI." -ForegroundColor White
 Write-Host "  2. Hard refresh the browser." -ForegroundColor White
-Write-Host "  3. Set ENABLE_OAUTH_PERSISTENT_CONFIG=true in the OWUI launch environment if you want SSO settings saved from the UI to persist across restarts." -ForegroundColor White
+Write-Host "  3. Launch through start_openwebui.ps1 if you want the patcher to set ENABLE_OAUTH_PERSISTENT_CONFIG, PDF_EXTRACT_IMAGES, and TESSERACT_CMD for you." -ForegroundColor White
+if (-not $TesseractPath) {
+  Write-Host "  4. Set TESSERACT_CMD before starting OWUI if you want OCR enabled." -ForegroundColor White
+}

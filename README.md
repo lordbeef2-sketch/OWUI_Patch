@@ -19,7 +19,15 @@ Quick start:
 .\patcher\install.bat
 ```
 
-Or patch a different OWUI Python install:
+The installer now prompts for the Open WebUI target and optional Tesseract path, then saves those answers to `patcher\local.settings.json` for later `status`, `restore`, and `start_openwebui` runs.
+
+Or patch a different OWUI install explicitly:
+
+```powershell
+.\patcher\install.ps1 -OpenWebUiTarget C:\path\to\OpenWebUI
+```
+
+You can still point straight at Python if you prefer:
 
 ```powershell
 .\patcher\install.ps1 -PythonExe C:\path\to\python.exe
