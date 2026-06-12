@@ -30,8 +30,8 @@ You can use it in either of these ways:
 - `Admin Panel -> Settings -> SSO`
 - full-height SSO settings page
 - dropdown-first SSO claim mapping UI with custom fallback fields
-- OCR for uploaded standalone images
-- OCR enrichment for image-heavy PDFs
+- Tesseract OCR for uploaded standalone images
+- hybrid PDF ingestion: PyMuPDF native extraction first, Tesseract fallback for scanned/image-heavy pages
 
 ## Install
 
@@ -48,9 +48,11 @@ Or:
 The installer:
 
 - verifies the target Open WebUI version is `0.9.2` unless you use `-SkipVersionCheck`
-- installs OCR dependencies
+- installs Python OCR dependencies
 - backs up every replaced file under `patcher\backups\...`
 - copies the patched payload into the target `site-packages\open_webui`
+
+Tesseract itself is not bundled by this patcher. The target machine should already have a local `tesseract` binary on `PATH`, or you should set `TESSERACT_CMD` to the full executable path before starting Open WebUI.
 
 ## Check
 

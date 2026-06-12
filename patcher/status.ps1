@@ -11,6 +11,29 @@ function Ok([string]$msg) { Write-Host "[patcher] $msg" -ForegroundColor Green }
 function Warn([string]$msg) { Write-Host "[patcher] $msg" -ForegroundColor Yellow }
 function Fail([string]$msg) { Write-Host "[patcher] $msg" -ForegroundColor Red; exit 1 }
 
+function Resolve-Tesseract {
+  if ($env:TESSERACT_CMD -and (Test-Path $env:TESSERACT_CMD)) {
+    return (Resolve-Path $env:TESSERACT_CMD).Path
+  }
+
+  $tesseractCmd = Get-Command tesseract -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($tesseractCmd) {
+    return $tesseractCmd.Source
+  }
+
+  $commonPaths = @(
+    "C:\Program Files\Tesseract-OCR\tesseract.exe",
+    "C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"
+  )
+  foreach ($candidate in $commonPaths) {
+    if (Test-Path $candidate) {
+      return (Resolve-Path $candidate).Path
+    }
+  }
+
+  return $null
+}
+
 function Resolve-Python([string]$Root, [string]$RequestedPython) {
   if ($RequestedPython) {
     if (-not (Test-Path $RequestedPython)) {
@@ -79,10 +102,17 @@ $Manifest = Get-Content -Path $ManifestPath -Raw | ConvertFrom-Json
 $PythonPath = Resolve-Python -Root $Root -RequestedPython $PythonExe
 $InstallInfo = Get-InstallInfo -PythonPath $PythonPath
 $SitePackagesRoot = $InstallInfo.site_packages
+$TesseractPath = Resolve-Tesseract
+$DetectedVersion = if ($null -ne $InstallInfo.version -and [string]$InstallInfo.version -ne "") { [string]$InstallInfo.version } else { "<unknown>" }
 
 Write-Host ("Python: {0}" -f $InstallInfo.python)
 Write-Host ("Open WebUI package root: {0}" -f $InstallInfo.package_root)
-Write-Host ("Open WebUI version: {0}" -f ($InstallInfo.version ?? "<unknown>"))
+Write-Host ("Open WebUI version: {0}" -f $DetectedVersion)
+if ($TesseractPath) {
+  Write-Host ("Tesseract: {0}" -f $TesseractPath)
+} else {
+  Warn "Tesseract binary not found on PATH and TESSERACT_CMD is not set."
+}
 
 if (-not $SkipVersionCheck -and $Manifest.target_version -and ($InstallInfo.version -ne $Manifest.target_version)) {
   Warn ("Version mismatch. Expected {0}, found {1}" -f $Manifest.target_version, $InstallInfo.version)

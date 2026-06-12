@@ -12,6 +12,29 @@ function Ok([string]$msg) { Write-Host "[patcher] $msg" -ForegroundColor Green }
 function Warn([string]$msg) { Write-Host "[patcher] $msg" -ForegroundColor Yellow }
 function Fail([string]$msg) { Write-Host "[patcher] $msg" -ForegroundColor Red; exit 1 }
 
+function Resolve-Tesseract {
+  if ($env:TESSERACT_CMD -and (Test-Path $env:TESSERACT_CMD)) {
+    return (Resolve-Path $env:TESSERACT_CMD).Path
+  }
+
+  $tesseractCmd = Get-Command tesseract -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($tesseractCmd) {
+    return $tesseractCmd.Source
+  }
+
+  $commonPaths = @(
+    "C:\Program Files\Tesseract-OCR\tesseract.exe",
+    "C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"
+  )
+  foreach ($candidate in $commonPaths) {
+    if (Test-Path $candidate) {
+      return (Resolve-Path $candidate).Path
+    }
+  }
+
+  return $null
+}
+
 function Resolve-Python([string]$Root, [string]$RequestedPython) {
   if ($RequestedPython) {
     if (-not (Test-Path $RequestedPython)) {
@@ -87,10 +110,17 @@ $Manifest = Get-Content -Path $ManifestPath -Raw | ConvertFrom-Json
 $PythonPath = Resolve-Python -Root $Root -RequestedPython $PythonExe
 $InstallInfo = Get-InstallInfo -PythonPath $PythonPath
 $SitePackagesRoot = $InstallInfo.site_packages
+$TesseractPath = Resolve-Tesseract
+$DetectedVersion = if ($null -ne $InstallInfo.version -and [string]$InstallInfo.version -ne "") { [string]$InstallInfo.version } else { "<unknown>" }
 
 Info ("Using Python: {0}" -f $InstallInfo.python)
 Info ("Detected Open WebUI package root: {0}" -f $InstallInfo.package_root)
-Info ("Detected Open WebUI version: {0}" -f ($InstallInfo.version ?? "<unknown>"))
+Info ("Detected Open WebUI version: {0}" -f $DetectedVersion)
+if ($TesseractPath) {
+  Info ("Detected Tesseract: {0}" -f $TesseractPath)
+} else {
+  Warn "Tesseract binary was not found. OCR will stay unavailable until tesseract is on PATH or TESSERACT_CMD is set."
+}
 
 if (-not $SkipVersionCheck -and $Manifest.target_version -and ($InstallInfo.version -ne $Manifest.target_version)) {
   Fail ("This patcher targets Open WebUI {0}, but found {1}. Use -SkipVersionCheck only if you already validated the file layout." -f $Manifest.target_version, $InstallInfo.version)

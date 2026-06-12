@@ -1,9 +1,9 @@
 {
-  "patch_id": "owui-twc-sso-ocr-v1",
+  "patch_id": "owui-twc-sso-ocr-v2",
   "target": "open-webui",
   "target_version": "0.9.2",
   "dependencies": [
-    "rapidocr-onnxruntime",
+    "pytesseract",
     "pillow",
     "pymupdf"
   ],
@@ -53,14 +53,14 @@
       "needle": "redirect_url = redirect_base_url or '/'"
     },
     {
-      "label": "PDF OCR loader",
+      "label": "Hybrid PDF loader",
       "target": "open_webui/retrieval/loaders/main.py",
-      "needle": "class SmartPDFLoader"
+      "needle": "class HybridPDFLoader"
     },
     {
-      "label": "Image OCR loader",
+      "label": "Tesseract image OCR loader",
       "target": "open_webui/retrieval/loaders/main.py",
-      "needle": "class RapidOCRImageLoader"
+      "needle": "class TesseractImageLoader"
     },
     {
       "label": "Settings loader shim",

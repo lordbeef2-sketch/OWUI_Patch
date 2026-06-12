@@ -1,11 +1,12 @@
 import asyncio
+import io
 import os
 import requests
 import logging
 import ftfy
 import sys
 import json
-import tempfile
+import shutil
 
 from azure.identity import DefaultAzureCredential
 from langchain_community.document_loaders import (
@@ -232,124 +233,244 @@ class DoclingLoader:
             raise Exception(f'Error calling Docling: {error_msg}')
 
 
-def _extract_rapidocr_text(image_path: str) -> str:
-    from rapidocr_onnxruntime import RapidOCR
+def _resolve_tesseract_cmd() -> str | None:
+    env_cmd = os.environ.get('TESSERACT_CMD', '').strip()
+    if env_cmd:
+        return env_cmd
 
-    if not hasattr(_extract_rapidocr_text, '_engine'):
-        _extract_rapidocr_text._engine = RapidOCR()
+    path_cmd = shutil.which('tesseract')
+    if path_cmd:
+        return path_cmd
 
-    result, _ = _extract_rapidocr_text._engine(image_path)
-    if not result:
+    common_windows_paths = [
+        r'C:\Program Files\Tesseract-OCR\tesseract.exe',
+        r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
+    ]
+    for candidate in common_windows_paths:
+        if os.path.exists(candidate):
+            return candidate
+
+    return None
+
+
+def _configure_tesseract() -> bool:
+    try:
+        import pytesseract
+    except ImportError:
+        if not getattr(_configure_tesseract, '_missing_dependency_logged', False):
+            log.warning('pytesseract is not installed. OCR fallback is unavailable.')
+            _configure_tesseract._missing_dependency_logged = True
+        return False
+
+    if getattr(_configure_tesseract, '_configured', False):
+        return True
+
+    tesseract_cmd = _resolve_tesseract_cmd()
+    if not tesseract_cmd:
+        if not getattr(_configure_tesseract, '_missing_binary_logged', False):
+            log.warning(
+                'Tesseract binary was not found. Set TESSERACT_CMD or add tesseract to PATH.'
+            )
+            _configure_tesseract._missing_binary_logged = True
+        return False
+
+    pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
+    _configure_tesseract._configured = True
+    return True
+
+
+def _score_ocr_text(text: str) -> tuple[int, int, int]:
+    compact_text = ''.join(ch for ch in text if ch.isalnum())
+    return (len(compact_text), len(text.split()), len(text.strip()))
+
+
+def _normalize_text(text: str) -> str:
+    return ' '.join((text or '').split()).strip().lower()
+
+
+def _prepare_image_for_ocr(image):
+    from PIL import ImageFilter, ImageOps
+
+    image = ImageOps.exif_transpose(image)
+
+    if image.mode not in ['RGB', 'L']:
+        image = image.convert('RGB')
+
+    grayscale = ImageOps.grayscale(image)
+
+    width, height = grayscale.size
+    shortest_edge = max(1, min(width, height))
+    if shortest_edge < 1400:
+        scale = 1400 / shortest_edge
+        resized = grayscale.resize((max(1, int(width * scale)), max(1, int(height * scale))))
+    else:
+        resized = grayscale
+
+    enhanced = ImageOps.autocontrast(resized).filter(ImageFilter.SHARPEN)
+    thresholded = enhanced.point(lambda value: 255 if value > 180 else 0)
+
+    return [enhanced, thresholded]
+
+
+def _extract_tesseract_text(image_path: str | None = None, image=None) -> str:
+    if not _configure_tesseract():
         return ''
 
-    lines = []
-    for item in result:
-        if isinstance(item, (list, tuple)) and len(item) >= 2:
-            text = str(item[1]).strip()
-            if text:
-                lines.append(text)
-    return '\n'.join(lines).strip()
+    import pytesseract
+    from PIL import Image
+
+    working_image = image
+    if working_image is None and image_path:
+        with Image.open(image_path) as opened_image:
+            working_image = opened_image.copy()
+
+    if working_image is None:
+        return ''
+
+    best_text = ''
+    best_score = (0, 0, 0)
+    configs = [
+        '--oem 3 --psm 6 -c preserve_interword_spaces=1',
+        '--oem 3 --psm 11 -c preserve_interword_spaces=1',
+    ]
+
+    for prepared_image in _prepare_image_for_ocr(working_image):
+        for config in configs:
+            try:
+                text = pytesseract.image_to_string(prepared_image, config=config).strip()
+            except Exception as exc:
+                log.warning(f'Tesseract OCR failed: {exc}')
+                continue
+
+            score = _score_ocr_text(text)
+            if score > best_score:
+                best_text = text
+                best_score = score
+
+            if best_score[0] >= 80:
+                break
+
+    return best_text.strip()
 
 
-class RapidOCRImageLoader:
+class TesseractImageLoader:
     def __init__(self, file_path):
         self.file_path = file_path
 
     def load(self) -> list[Document]:
-        text = _extract_rapidocr_text(self.file_path)
+        text = _extract_tesseract_text(image_path=self.file_path)
         return [
             Document(
                 page_content=text or '<No text content found>',
-                metadata={'source': self.file_path, 'loader': 'rapidocr_image'},
+                metadata={'source': self.file_path, 'loader': 'tesseract_image'},
             )
         ]
 
 
-class SmartPDFLoader:
+class HybridPDFLoader:
     def __init__(self, file_path, extract_images=False, mode='page'):
         self.file_path = file_path
         self.extract_images = extract_images
         self.mode = mode
 
-    def _load_pdf_text(self) -> list[Document]:
-        return PyPDFLoader(
-            self.file_path,
-            extract_images=self.extract_images,
-            mode=self.mode,
-        ).load()
-
-    def _load_pdf_ocr_text(self) -> list[str]:
-        if not self.extract_images:
-            return []
-
+    def _open_pdf(self):
         try:
             import fitz
         except ImportError:
-            log.warning('PyMuPDF is not installed. Skipping OCR enrichment for PDF images.')
-            return []
+            log.warning('PyMuPDF is not installed. Falling back to PyPDFLoader for PDF text extraction.')
+            return None
 
-        ocr_pages = []
-        with fitz.open(self.file_path) as pdf:
+        return fitz.open(self.file_path)
+
+    def _extract_native_page_text(self, page) -> str:
+        blocks = page.get_text('blocks', sort=True)
+        block_text = [
+            str(block[4]).strip()
+            for block in blocks
+            if len(block) >= 5 and str(block[4]).strip()
+        ]
+        text = '\n\n'.join(block_text).strip()
+        if text:
+            return text
+        return (page.get_text('text', sort=True) or '').strip()
+
+    def _should_ocr_page(self, page, native_text: str) -> bool:
+        if not self.extract_images:
+            return False
+
+        if not native_text.strip():
+            return True
+
+        image_count = len(page.get_images(full=True))
+        if image_count == 0:
+            return False
+
+        text_word_count = len(native_text.split())
+        text_char_count = len([ch for ch in native_text if not ch.isspace()])
+        return text_word_count < 40 or text_char_count < 250
+
+    def _render_page_for_ocr(self, page):
+        import fitz
+        from PIL import Image
+
+        pixmap = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5), alpha=False)
+        with Image.open(io.BytesIO(pixmap.tobytes('png'))) as rendered_image:
+            return rendered_image.copy()
+
+    def _build_page_documents(self) -> list[Document]:
+        pdf = self._open_pdf()
+        if pdf is None:
+            return PyPDFLoader(
+                self.file_path,
+                extract_images=self.extract_images,
+                mode=self.mode,
+            ).load()
+
+        docs = []
+        try:
+            total_pages = pdf.page_count
             for page in pdf:
-                existing_text = (page.get_text('text') or '').strip()
-                has_inline_images = bool(page.get_images(full=True))
-                should_ocr = has_inline_images or not existing_text
+                native_text = self._extract_native_page_text(page)
+                page_text = native_text
+                metadata = {
+                    'source': self.file_path,
+                    'page': page.number + 1,
+                    'total_pages': total_pages,
+                    'loader': 'hybrid_pdf',
+                }
 
-                if not should_ocr:
-                    ocr_pages.append('')
-                    continue
+                if self._should_ocr_page(page, native_text):
+                    try:
+                        page_image = self._render_page_for_ocr(page)
+                        ocr_text = _extract_tesseract_text(image=page_image)
+                    except Exception as exc:
+                        log.warning(f'Failed OCR fallback for PDF page {page.number + 1}: {exc}')
+                        ocr_text = ''
 
-                temp_path = None
-                try:
-                    pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
-                    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp_file:
-                        temp_path = temp_file.name
-                    pixmap.save(temp_path)
-                    ocr_pages.append(_extract_rapidocr_text(temp_path))
-                except Exception as exc:
-                    log.warning(f'Failed OCR enrichment for PDF page {page.number + 1}: {exc}')
-                    ocr_pages.append('')
-                finally:
-                    if temp_path and os.path.exists(temp_path):
-                        try:
-                            os.remove(temp_path)
-                        except OSError:
-                            pass
+                    normalized_page_text = _normalize_text(native_text)
+                    normalized_ocr_text = _normalize_text(ocr_text)
+                    if normalized_ocr_text and normalized_ocr_text not in normalized_page_text:
+                        page_text = f'{native_text}\n\n{ocr_text}'.strip() if native_text else ocr_text
+                        metadata['ocr'] = 'tesseract'
 
-        return ocr_pages
+                docs.append(Document(page_content=page_text or '', metadata=metadata))
+        finally:
+            pdf.close()
+
+        return docs
 
     def load(self) -> list[Document]:
-        docs = self._load_pdf_text()
-        ocr_pages = self._load_pdf_ocr_text()
-
-        if not ocr_pages:
+        docs = self._build_page_documents()
+        if self.mode != 'single':
             return docs
 
-        if len(docs) == len(ocr_pages):
-            for index, doc in enumerate(docs):
-                ocr_text = (ocr_pages[index] or '').strip()
-                if not ocr_text:
-                    continue
-
-                page_text = (doc.page_content or '').strip()
-                normalized_page_text = page_text.replace('\n', ' ').strip()
-                normalized_ocr_text = ocr_text.replace('\n', ' ').strip()
-
-                if normalized_ocr_text and normalized_ocr_text not in normalized_page_text:
-                    doc.page_content = f'{page_text}\n\n{ocr_text}'.strip() if page_text else ocr_text
-                    doc.metadata = {**doc.metadata, 'ocr': 'rapidocr'}
-            return docs
-
-        combined_ocr = '\n\n'.join([text for text in ocr_pages if text.strip()]).strip()
-        if not combined_ocr:
-            return docs
-
-        if docs:
-            docs[0].page_content = f'{docs[0].page_content}\n\n{combined_ocr}'.strip()
-            docs[0].metadata = {**docs[0].metadata, 'ocr': 'rapidocr'}
-            return docs
-
-        return [Document(page_content=combined_ocr, metadata={'source': self.file_path, 'ocr': 'rapidocr'})]
+        combined_text = '\n\n'.join(
+            [doc.page_content.strip() for doc in docs if (doc.page_content or '').strip()]
+        ).strip()
+        combined_metadata = {'source': self.file_path, 'loader': 'hybrid_pdf'}
+        if any(doc.metadata.get('ocr') == 'tesseract' for doc in docs):
+            combined_metadata['ocr'] = 'tesseract'
+        return [Document(page_content=combined_text or '<No text content found>', metadata=combined_metadata)]
 
 
 class Loader:
@@ -532,7 +653,7 @@ class Loader:
             )
         else:
             if file_ext == 'pdf':
-                loader = SmartPDFLoader(
+                loader = HybridPDFLoader(
                     file_path,
                     extract_images=self.kwargs.get('PDF_EXTRACT_IMAGES'),
                     mode=self.kwargs.get('PDF_LOADER_MODE', 'page'),
@@ -625,7 +746,7 @@ class Loader:
                         'Install it with: pip install unstructured'
                     )
             elif file_ext in image_file_ext or (file_content_type and file_content_type.startswith('image/')):
-                loader = RapidOCRImageLoader(file_path)
+                loader = TesseractImageLoader(file_path)
             elif self._is_text_file(file_ext, file_content_type):
                 loader = TextLoader(file_path, autodetect_encoding=True)
             else:

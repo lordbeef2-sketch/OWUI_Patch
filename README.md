@@ -7,7 +7,8 @@ This package recreates the local OWUI changes we made for:
 - TWC OIDC sign-in flow that lands back in OWUI already logged in
 - `Admin Panel -> Settings -> SSO`
 - dropdown-based SSO claim mapping UI
-- uploaded image and image-heavy PDF OCR for agents
+- native PDF extraction with Tesseract fallback for scanned pages
+- uploaded image OCR for agents using Tesseract
 
 The actual patcher lives in [`patcher/`](patcher).
 
@@ -24,3 +25,4 @@ Or patch a different OWUI Python install:
 ```
 
 This patch is packaged for `Open WebUI 0.9.2` and validates that version by default.
+It installs Python-side OCR dependencies, but it expects a local `tesseract` binary to already exist on the machine or be provided through `TESSERACT_CMD`.
