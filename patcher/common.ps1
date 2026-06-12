@@ -117,17 +117,28 @@ function Resolve-AbsolutePath([string]$CandidatePath, [string]$BaseRoot) {
   }
 
   $expanded = [Environment]::ExpandEnvironmentVariables($CandidatePath.Trim())
-  $pathToCheck = if ([System.IO.Path]::IsPathRooted($expanded)) {
-    $expanded
-  } else {
-    Join-Path $BaseRoot $expanded
+  if ([System.IO.Path]::IsPathRooted($expanded)) {
+    if (-not (Test-Path $expanded)) {
+      throw ("Path not found: {0}" -f $CandidatePath)
+    }
+    return (Resolve-Path $expanded).Path
   }
 
-  if (-not (Test-Path $pathToCheck)) {
-    throw ("Path not found: {0}" -f $CandidatePath)
+  $searchRoots = [System.Collections.Generic.List[string]]::new()
+  try {
+    Add-UniqueString -List $searchRoots -Value ((Get-Location).Path)
+  } catch {
+  }
+  Add-UniqueString -List $searchRoots -Value $BaseRoot
+
+  foreach ($root in $searchRoots) {
+    $pathToCheck = Join-Path $root $expanded
+    if (Test-Path $pathToCheck) {
+      return (Resolve-Path $pathToCheck).Path
+    }
   }
 
-  return (Resolve-Path $pathToCheck).Path
+  throw ("Path not found: {0}" -f $CandidatePath)
 }
 
 function Resolve-PythonFromTarget([string]$TargetPath, [string]$BaseRoot) {
@@ -376,11 +387,19 @@ function Resolve-OpenWebUiTarget(
   [switch]$PromptForConfirmation
 ) {
   $repoRoot = (Resolve-Path (Join-Path $PatcherRoot '..')).Path
-  $lastError = "No Open WebUI install was detected one level above patcher."
+  $cwdRoot = ""
+  try {
+    $cwdRoot = (Resolve-Path (Get-Location).Path).Path
+  } catch {
+  }
+
+  $searchRoots = [System.Collections.Generic.List[string]]::new()
+  Add-UniqueString -List $searchRoots -Value $cwdRoot
+  Add-UniqueString -List $searchRoots -Value $repoRoot
+
+  $lastError = "No Open WebUI install was detected in the current working directory or one level above patcher."
   $savedOwuiTarget = Get-ConfigValue -Config $SavedConfig -Name 'owui_target'
   $savedPythonExe = Get-ConfigValue -Config $SavedConfig -Name 'python_exe'
-  $localPythonCandidates = @(Get-LocalPythonCandidates -RepoRoot $repoRoot)
-  $localPackageCandidates = @(Get-LocalOpenWebUiPackageCandidates -RepoRoot $repoRoot)
 
   function Get-FirstUsablePython([string[]]$PreferredCandidates) {
     foreach ($candidate in $PreferredCandidates) {
@@ -460,24 +479,42 @@ function Resolve-OpenWebUiTarget(
     return $null
   }
 
-  # Highest priority: the patcher folder's parent. This is the required layout: .\owui\patcher.
-  foreach ($packageRoot in $localPackageCandidates) {
-    try {
-      $resolved = New-ResolvedResultFromPackage -PackageRoot $packageRoot -Source 'Open WebUI folder above patcher' -SelectedInput $repoRoot -PreferredPythonCandidates $localPythonCandidates
+  foreach ($searchRoot in $searchRoots) {
+    $rootPythonCandidates = @(Get-LocalPythonCandidates -RepoRoot $searchRoot)
+    $rootPackageCandidates = @(Get-LocalOpenWebUiPackageCandidates -RepoRoot $searchRoot)
+    $rootLabel = if ($searchRoot -ieq $cwdRoot -and $searchRoot -ieq $repoRoot) {
+      'current working directory / folder above patcher'
+    } elseif ($searchRoot -ieq $cwdRoot) {
+      'current working directory'
+    } else {
+      'Open WebUI folder above patcher'
+    }
+
+    foreach ($packageRoot in $rootPackageCandidates) {
+      try {
+        $resolved = New-ResolvedResultFromPackage -PackageRoot $packageRoot -Source $rootLabel -SelectedInput $searchRoot -PreferredPythonCandidates $rootPythonCandidates
+        if ($resolved) {
+          Info ('Detected Open WebUI via {0}: {1}' -f $rootLabel, $resolved.InstallInfo.package_root)
+          return $resolved
+        }
+      } catch {
+        $lastError = $_.Exception.Message
+      }
+    }
+
+    foreach ($pythonPath in $rootPythonCandidates) {
+      $pythonLabel = if ($searchRoot -ieq $cwdRoot -and $searchRoot -ieq $repoRoot) {
+        'local Python in current working directory / folder above patcher'
+      } elseif ($searchRoot -ieq $cwdRoot) {
+        'local Python in current working directory'
+      } else {
+        'local Python above patcher'
+      }
+      $resolved = Try-ResolvePathCandidate -Value $pythonPath -Label $pythonLabel -PreferredPythonCandidates @($pythonPath)
       if ($resolved) {
-        Info ('Detected Open WebUI one level above patcher: {0}' -f $resolved.InstallInfo.package_root)
+        Info ('Detected Open WebUI through {0}: {1}' -f $pythonLabel, $resolved.PythonPath)
         return $resolved
       }
-    } catch {
-      $lastError = $_.Exception.Message
-    }
-  }
-
-  foreach ($pythonPath in $localPythonCandidates) {
-    $resolved = Try-ResolvePathCandidate -Value $pythonPath -Label 'local Python above patcher' -PreferredPythonCandidates @($pythonPath)
-    if ($resolved) {
-      Info ('Detected Open WebUI through local Python above patcher: {0}' -f $resolved.PythonPath)
-      return $resolved
     }
   }
 
@@ -488,7 +525,7 @@ function Resolve-OpenWebUiTarget(
     [pscustomobject]@{ Value = $savedOwuiTarget; Label = 'saved OWUI target' },
     [pscustomobject]@{ Value = $savedPythonExe; Label = 'saved Python' }
   )) {
-    $preferredPython = @($localPythonCandidates)
+    $preferredPython = @()
     if ($pair.Label -like '*Python' -and -not [string]::IsNullOrWhiteSpace([string]$pair.Value)) {
       $preferredPython = @([string]$pair.Value) + $preferredPython
     }
@@ -505,7 +542,8 @@ function Resolve-OpenWebUiTarget(
 
   Warn $lastError
   while ($true) {
-    $selectedRoot = Select-OpenWebUiRootWithGui -InitialDirectory $repoRoot
+    $pickerRoot = if (-not [string]::IsNullOrWhiteSpace($cwdRoot)) { $cwdRoot } else { $repoRoot }
+    $selectedRoot = Select-OpenWebUiRootWithGui -InitialDirectory $pickerRoot
     if ([string]::IsNullOrWhiteSpace($selectedRoot)) {
       Fail 'Open WebUI target selection was cancelled.'
     }
@@ -579,6 +617,10 @@ function Resolve-TesseractPath(
 
   if ($defaultPath -and -not $PromptForConfirmation) {
     return $defaultPath
+  }
+
+  if ($Optional -and -not $PromptForConfirmation -and -not $defaultPath) {
+    return $null
   }
 
   if (-not $AllowPrompt) {

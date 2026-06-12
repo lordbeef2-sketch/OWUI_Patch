@@ -3633,7 +3633,7 @@ OAUTH_CODE_CHALLENGE_METHOD = ConfigVar(
 OAUTH_PROVIDER_NAME = ConfigVar(
     'OAUTH_PROVIDER_NAME',
     'oauth.oidc.provider_name',
-    os.getenv('OAUTH_PROVIDER_NAME', 'SSO'),
+    os.getenv('OAUTH_PROVIDER_NAME', 'oidc'),
 )
 
 OAUTH_SUB_CLAIM = ConfigVar(
@@ -3645,7 +3645,7 @@ OAUTH_SUB_CLAIM = ConfigVar(
 OAUTH_USERNAME_CLAIM = ConfigVar(
     'OAUTH_USERNAME_CLAIM',
     'oauth.oidc.username_claim',
-    os.getenv('OAUTH_USERNAME_CLAIM', 'name'),
+    os.getenv('OAUTH_USERNAME_CLAIM', 'preferred_username'),
 )
 
 

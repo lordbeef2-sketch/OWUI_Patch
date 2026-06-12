@@ -36,9 +36,10 @@ function Get-MissingDependencies([string]$PythonPath, $Dependencies) {
   $pythonScript = @'
 import importlib
 import json
+import os
 import sys
 
-payload = json.loads(sys.stdin.read())
+payload = json.loads(os.environ["OWUI_PATCHER_DEPENDENCY_PAYLOAD"])
 missing = []
 for entry in payload:
     module_name = entry["module"]
@@ -57,11 +58,22 @@ print(json.dumps(missing))
     }
   }
 
-  $jsonPayload = $payload | ConvertTo-Json
-  $result = $jsonPayload | & $PythonPath -c $pythonScript
-  if ($LASTEXITCODE -ne 0) {
-    Warn "Could not verify installed dependency imports ahead of time. Falling back to installer flow."
-    return @($Dependencies)
+  $jsonPayload = $payload | ConvertTo-Json -Compress
+  $previousPayload = $env:OWUI_PATCHER_DEPENDENCY_PAYLOAD
+  $env:OWUI_PATCHER_DEPENDENCY_PAYLOAD = [string]$jsonPayload
+
+  try {
+    $result = $pythonScript | & $PythonPath - 2>$null
+    if ($LASTEXITCODE -ne 0) {
+      Warn "Could not verify installed dependency imports ahead of time. Falling back to installer flow."
+      return @($Dependencies)
+    }
+  } finally {
+    if ($null -eq $previousPayload) {
+      Remove-Item Env:OWUI_PATCHER_DEPENDENCY_PAYLOAD -ErrorAction SilentlyContinue
+    } else {
+      $env:OWUI_PATCHER_DEPENDENCY_PAYLOAD = $previousPayload
+    }
   }
 
   try {
@@ -77,22 +89,45 @@ print(json.dumps(missing))
 }
 
 function Test-PipAvailable([string]$PythonPath) {
-  & $PythonPath -m pip --version *> $null
-  if ($LASTEXITCODE -eq 0) {
+  $pythonScript = @'
+import importlib.util
+print("1" if importlib.util.find_spec("pip") is not None else "0")
+'@
+
+  try {
+    $result = $pythonScript | & $PythonPath - 2>$null
+  } catch {
+    return $false
+  }
+
+  if ($LASTEXITCODE -eq 0 -and (($result -join "`n").Trim() -eq '1')) {
     return $true
   }
 
+  return $false
+}
+
+function Try-BootstrapPip([string]$PythonPath) {
   Warn "pip is not available in the selected Python environment. Attempting to bootstrap it with ensurepip."
-  & $PythonPath -m ensurepip --upgrade
-  if ($LASTEXITCODE -eq 0) {
-    & $PythonPath -m pip --version *> $null
-    if ($LASTEXITCODE -eq 0) {
-      return $true
-    }
+  try {
+    & $PythonPath -m ensurepip --upgrade 1>$null 2>$null
+  } catch {
   }
 
-  Warn "ensurepip could not provision pip in the selected environment. Falling back to a host Python pip if one is available."
+  if (Test-PipAvailable -PythonPath $PythonPath) {
+    return $true
+  }
+
   return $false
+}
+
+function Resolve-UvCommand() {
+  $uvCmd = Get-Command uv -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($uvCmd -and -not [string]::IsNullOrWhiteSpace([string]$uvCmd.Source)) {
+    return [string]$uvCmd.Source
+  }
+
+  return $null
 }
 
 function Resolve-HostPipPython([string]$TargetPythonPath) {
@@ -118,9 +153,9 @@ function Resolve-HostPipPython([string]$TargetPythonPath) {
     }
 
     if ((Split-Path -Leaf $candidate).ToLowerInvariant() -eq 'py.exe') {
-      & $candidate -m pip --version *> $null
+      & $candidate -m pip --version 1>$null 2>$null
     } else {
-      & $candidate -m pip --version *> $null
+      & $candidate -m pip --version 1>$null 2>$null
     }
 
     if ($LASTEXITCODE -eq 0) {
@@ -137,11 +172,28 @@ function Install-PatcherDependencies([string]$TargetPythonPath, [string]$SitePac
     return $LASTEXITCODE
   }
 
-  $hostPipPython = Resolve-HostPipPython -TargetPythonPath $TargetPythonPath
-  if (-not $hostPipPython) {
-    Fail "Dependency installation failed because no usable pip was found. Install pip on a host Python or rerun with -SkipDependencyInstall."
+  $uvPath = Resolve-UvCommand
+  if ($uvPath) {
+    Info ("Using uv to install into {0}" -f $TargetPythonPath)
+    & $uvPath pip install --python $TargetPythonPath @($Dependencies)
+    if ($LASTEXITCODE -eq 0) {
+      return 0
+    }
+
+    Warn "uv dependency install failed. Trying other installation methods."
   }
 
+  if (Try-BootstrapPip -PythonPath $TargetPythonPath) {
+    & $TargetPythonPath -m pip install --disable-pip-version-check @($Dependencies)
+    return $LASTEXITCODE
+  }
+
+  $hostPipPython = Resolve-HostPipPython -TargetPythonPath $TargetPythonPath
+  if (-not $hostPipPython) {
+    Fail "Dependency installation failed because no usable pip or uv was found. Install pip on a host Python, install uv, or rerun with -SkipDependencyInstall."
+  }
+
+  Warn "ensurepip could not provision pip in the selected environment. Falling back to a host Python pip if one is available."
   Info ("Using host pip from {0} to install into {1}" -f $hostPipPython, $SitePackagesPath)
   & $hostPipPython -m pip install --disable-pip-version-check --upgrade --target $SitePackagesPath @($Dependencies)
   return $LASTEXITCODE

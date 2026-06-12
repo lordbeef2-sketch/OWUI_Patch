@@ -1153,8 +1153,8 @@ async def update_admin_config(request: Request, form_data: AdminConfig, user=Dep
 
 
 SSO_CLAIM_PRESETS = {
-    'sub_claim': ['sub', 'oid', 'preferred_username', 'email'],
-    'username_claim': ['name', 'preferred_username', 'given_name', 'email'],
+    'user_id_claim': ['sub', 'oid', 'preferred_username', 'email'],
+    'username_claim': ['preferred_username', 'name', 'given_name', 'email'],
     'email_claim': ['email', 'upn', 'preferred_username'],
     'picture_claim': ['picture', 'avatar_url', 'profile_image_url'],
     'groups_claim': ['groups', 'roles', 'memberOf'],
@@ -1174,9 +1174,12 @@ def _compute_sso_callback_url(request: Request, redirect_uri: Optional[str] = No
 
 
 def _get_sso_config_payload(request: Request) -> dict:
+    discovery_url = _normalize_optional_text(request.app.state.config.OPENID_PROVIDER_URL)
+    user_id_claim = _normalize_optional_text(request.app.state.config.OAUTH_SUB_CLAIM) or 'sub'
     return {
-        'openid_provider_url': _normalize_optional_text(request.app.state.config.OPENID_PROVIDER_URL),
-        'provider_name': _normalize_optional_text(request.app.state.config.OAUTH_PROVIDER_NAME) or 'SSO',
+        'discovery_url': discovery_url,
+        'openid_provider_url': discovery_url,
+        'provider_name': _normalize_optional_text(request.app.state.config.OAUTH_PROVIDER_NAME) or 'oidc',
         'client_id': _normalize_optional_text(request.app.state.config.OAUTH_CLIENT_ID),
         'client_secret': _normalize_optional_text(request.app.state.config.OAUTH_CLIENT_SECRET),
         'redirect_uri': _normalize_optional_text(request.app.state.config.OPENID_REDIRECT_URI),
@@ -1185,8 +1188,10 @@ def _get_sso_config_payload(request: Request) -> dict:
         'end_session_endpoint': _normalize_optional_text(request.app.state.config.OPENID_END_SESSION_ENDPOINT),
         'token_endpoint_auth_method': _normalize_optional_text(request.app.state.config.OAUTH_TOKEN_ENDPOINT_AUTH_METHOD),
         'code_challenge_method': _normalize_optional_text(request.app.state.config.OAUTH_CODE_CHALLENGE_METHOD),
-        'sub_claim': _normalize_optional_text(request.app.state.config.OAUTH_SUB_CLAIM) or 'sub',
-        'username_claim': _normalize_optional_text(request.app.state.config.OAUTH_USERNAME_CLAIM) or 'name',
+        'user_id_claim': user_id_claim,
+        'sub_claim': user_id_claim,
+        'username_claim': _normalize_optional_text(request.app.state.config.OAUTH_USERNAME_CLAIM)
+        or 'preferred_username',
         'email_claim': _normalize_optional_text(request.app.state.config.OAUTH_EMAIL_CLAIM) or 'email',
         'picture_claim': _normalize_optional_text(request.app.state.config.OAUTH_PICTURE_CLAIM) or 'picture',
         'groups_claim': _normalize_optional_text(request.app.state.config.OAUTH_GROUPS_CLAIM) or 'groups',
@@ -1509,10 +1514,10 @@ def _build_sso_ui_html(request: Request) -> str:
         <div class="row-grid">
           <label class="field-row">
             <div class="label-block">
-              <strong>OpenID Discovery URL</strong>
+              <strong>Discovery URL</strong>
               <span>Paste the TWC discovery document URL, usually the <code>.well-known/openid-configuration</code> endpoint.</span>
             </div>
-            <div class="field-stack"><input id="openid_provider_url" type="text" autocomplete="off"></div>
+            <div class="field-stack"><input id="discovery_url" type="text" autocomplete="off"></div>
           </label>
           <label class="field-row">
             <div class="label-block">
@@ -1596,12 +1601,12 @@ def _build_sso_ui_html(request: Request) -> str:
           </label>
           <label class="field-row">
             <div class="label-block">
-              <strong>Subject Claim</strong>
+              <strong>User ID Claim</strong>
               <span>The stable unique ID claim OWUI stores against the TWC identity.</span>
             </div>
             <div class="field-stack">
-              <select id="sub_claim"></select>
-              <input id="sub_claim_custom" class="custom-field" type="text" placeholder="Custom subject claim" hidden>
+              <select id="user_id_claim"></select>
+              <input id="user_id_claim_custom" class="custom-field" type="text" placeholder="Custom user ID claim" hidden>
             </div>
           </label>
           <label class="field-row">
@@ -1667,7 +1672,7 @@ def _build_sso_ui_html(request: Request) -> str:
       const warningEl = document.getElementById('persistence-warning');
       const selectPresetMap = boot.config.claim_presets;
 
-      const selectFieldIds = ['sub_claim', 'username_claim', 'email_claim', 'picture_claim', 'groups_claim'];
+      const selectFieldIds = ['user_id_claim', 'username_claim', 'email_claim', 'picture_claim', 'groups_claim'];
       const protocolFieldIds = ['token_endpoint_auth_method', 'code_challenge_method'];
 
       const setStatus = (message, kind = '') => {
@@ -1747,8 +1752,8 @@ def _build_sso_ui_html(request: Request) -> str:
       };
 
       const fillForm = (config) => {
-        document.getElementById('openid_provider_url').value = config.openid_provider_url || '';
-        document.getElementById('provider_name').value = config.provider_name || 'SSO';
+        document.getElementById('discovery_url').value = config.discovery_url || config.openid_provider_url || '';
+        document.getElementById('provider_name').value = config.provider_name || 'oidc';
         document.getElementById('client_id').value = config.client_id || '';
         document.getElementById('client_secret').value = config.client_secret || '';
         document.getElementById('redirect_uri').value = config.redirect_uri || '';
@@ -1772,7 +1777,7 @@ def _build_sso_ui_html(request: Request) -> str:
       };
 
       const buildPayload = () => ({
-        openid_provider_url: document.getElementById('openid_provider_url').value.trim(),
+        discovery_url: document.getElementById('discovery_url').value.trim(),
         provider_name: document.getElementById('provider_name').value.trim(),
         client_id: document.getElementById('client_id').value.trim(),
         client_secret: document.getElementById('client_secret').value,
@@ -1781,7 +1786,7 @@ def _build_sso_ui_html(request: Request) -> str:
         end_session_endpoint: document.getElementById('end_session_endpoint').value.trim(),
         token_endpoint_auth_method: readSelectValue('token_endpoint_auth_method'),
         code_challenge_method: readSelectValue('code_challenge_method'),
-        sub_claim: readSelectValue('sub_claim'),
+        user_id_claim: readSelectValue('user_id_claim'),
         username_claim: readSelectValue('username_claim'),
         email_claim: readSelectValue('email_claim'),
         picture_claim: readSelectValue('picture_claim'),
@@ -1875,8 +1880,9 @@ def _build_sso_ui_html(request: Request) -> str:
 
 
 class SSOConfigForm(BaseModel):
+    discovery_url: str = ''
     openid_provider_url: str = ''
-    provider_name: str = 'SSO'
+    provider_name: str = 'oidc'
     client_id: str = ''
     client_secret: str = ''
     redirect_uri: str = ''
@@ -1884,8 +1890,9 @@ class SSOConfigForm(BaseModel):
     end_session_endpoint: str = ''
     token_endpoint_auth_method: str = ''
     code_challenge_method: str = ''
-    sub_claim: str = 'sub'
-    username_claim: str = 'name'
+    user_id_claim: str = 'sub'
+    sub_claim: str = ''
+    username_claim: str = 'preferred_username'
     email_claim: str = 'email'
     picture_claim: str = 'picture'
     groups_claim: str = 'groups'
@@ -1901,8 +1908,13 @@ async def get_sso_config(request: Request, user=Depends(get_admin_user)):
 
 @router.post('/admin/config/sso')
 async def update_sso_config(request: Request, form_data: SSOConfigForm, user=Depends(get_admin_user)):
-    request.app.state.config.OPENID_PROVIDER_URL = _normalize_optional_text(form_data.openid_provider_url)
-    request.app.state.config.OAUTH_PROVIDER_NAME = _normalize_optional_text(form_data.provider_name) or 'SSO'
+    discovery_url = _normalize_optional_text(form_data.discovery_url) or _normalize_optional_text(
+        form_data.openid_provider_url
+    )
+    user_id_claim = _normalize_optional_text(form_data.user_id_claim) or _normalize_optional_text(form_data.sub_claim)
+
+    request.app.state.config.OPENID_PROVIDER_URL = discovery_url
+    request.app.state.config.OAUTH_PROVIDER_NAME = _normalize_optional_text(form_data.provider_name) or 'oidc'
     request.app.state.config.OAUTH_CLIENT_ID = _normalize_optional_text(form_data.client_id)
     request.app.state.config.OAUTH_CLIENT_SECRET = _normalize_optional_text(form_data.client_secret)
     request.app.state.config.OPENID_REDIRECT_URI = _normalize_optional_text(form_data.redirect_uri)
@@ -1912,8 +1924,10 @@ async def update_sso_config(request: Request, form_data: SSOConfigForm, user=Dep
         form_data.token_endpoint_auth_method
     )
     request.app.state.config.OAUTH_CODE_CHALLENGE_METHOD = _normalize_optional_text(form_data.code_challenge_method)
-    request.app.state.config.OAUTH_SUB_CLAIM = _normalize_optional_text(form_data.sub_claim) or 'sub'
-    request.app.state.config.OAUTH_USERNAME_CLAIM = _normalize_optional_text(form_data.username_claim) or 'name'
+    request.app.state.config.OAUTH_SUB_CLAIM = user_id_claim or 'sub'
+    request.app.state.config.OAUTH_USERNAME_CLAIM = (
+        _normalize_optional_text(form_data.username_claim) or 'preferred_username'
+    )
     request.app.state.config.OAUTH_EMAIL_CLAIM = _normalize_optional_text(form_data.email_claim) or 'email'
     request.app.state.config.OAUTH_PICTURE_CLAIM = _normalize_optional_text(form_data.picture_claim) or 'picture'
     request.app.state.config.OAUTH_GROUPS_CLAIM = _normalize_optional_text(form_data.groups_claim) or 'groups'
