@@ -28,8 +28,10 @@ You can use it in either of these ways:
 - cookie-backed session restore so the returned user is already logged in
 - automatic redirect to the sole configured OAuth provider
 - `Admin Panel -> Settings -> SSO`
+- left-sidebar `Workbench` bridge panel that keeps OWUI as the main chat surface
 - full-height SSO settings page
 - dropdown-first SSO claim mapping UI with custom fallback fields
+- per-user Workbench connection, server, project, branch, and branch-model selectors
 - Tesseract OCR for uploaded standalone images
 - hybrid PDF ingestion: PyMuPDF native extraction first, Tesseract fallback for scanned/image-heavy pages
 

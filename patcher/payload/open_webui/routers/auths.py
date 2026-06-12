@@ -1,4 +1,5 @@
 import asyncio
+import json
 import re
 import uuid
 import time
@@ -95,7 +96,7 @@ from open_webui.utils.redis import get_redis_client
 from open_webui.utils.rate_limit import RateLimiter
 
 
-from typing import Optional, List
+from typing import Optional, List, Any
 
 from ssl import CERT_NONE, CERT_REQUIRED, PROTOCOL_TLS
 
@@ -1915,6 +1916,1219 @@ async def update_sso_config(request: Request, form_data: SSOConfigForm, user=Dep
 @router.get('/admin/config/sso/ui', response_class=HTMLResponse)
 async def get_sso_config_ui(request: Request, user=Depends(get_admin_user)):
     return HTMLResponse(_build_sso_ui_html(request))
+
+
+TWC_WORKBENCH_SETTINGS_KEY = 'twc_workbench'
+
+
+def _normalize_workbench_base_url(value: Optional[str]) -> str:
+    normalized = _normalize_optional_text(value)
+    if not normalized:
+        return ''
+
+    if '://' not in normalized:
+        if normalized.startswith(('localhost', '127.0.0.1', '0.0.0.0', '[::1]')):
+            normalized = f'http://{normalized}'
+        else:
+            normalized = f'https://{normalized}'
+
+    return normalized.rstrip('/')
+
+
+def _is_local_workbench_url(base_url: str) -> bool:
+    try:
+        parsed = urllib.parse.urlparse(base_url)
+    except Exception:
+        return False
+
+    hostname = (parsed.hostname or '').strip().lower()
+    return hostname in {'localhost', '127.0.0.1', '0.0.0.0', '::1'}
+
+
+def _get_workbench_user_settings(user) -> dict:
+    raw_settings = user.settings or {}
+    ui_settings = raw_settings.get('ui') or {}
+    workbench_settings = ui_settings.get(TWC_WORKBENCH_SETTINGS_KEY) or {}
+
+    base_url = _normalize_workbench_base_url(workbench_settings.get('base_url'))
+    verify_tls = workbench_settings.get('verify_tls')
+    if verify_tls is None:
+        verify_tls = not _is_local_workbench_url(base_url)
+
+    return {
+        'base_url': base_url,
+        'api_key': _normalize_optional_text(workbench_settings.get('api_key')),
+        'verify_tls': bool(verify_tls),
+        'owui_model_id': _normalize_optional_text(workbench_settings.get('owui_model_id')),
+        'owui_function_id': _normalize_optional_text(workbench_settings.get('owui_function_id')),
+        'workbench_server_id': _normalize_optional_text(workbench_settings.get('workbench_server_id')),
+        'workbench_project_id': _normalize_optional_text(workbench_settings.get('workbench_project_id')),
+        'workbench_branch_id': _normalize_optional_text(workbench_settings.get('workbench_branch_id')),
+        'workbench_branch_model_id': _normalize_optional_text(workbench_settings.get('workbench_branch_model_id')),
+        'updated_at': _normalize_optional_text(workbench_settings.get('updated_at')),
+    }
+
+
+def _workbench_api_key_hint(api_key: str) -> str:
+    token = _normalize_optional_text(api_key)
+    if not token:
+        return ''
+    if len(token) <= 8:
+        return 'Stored'
+    return f'{token[:4]}...{token[-4:]}'
+
+
+def _build_workbench_context_payload(user) -> dict:
+    settings = _get_workbench_user_settings(user)
+    return {
+        'user': {
+            'id': user.id,
+            'email': user.email,
+            'name': user.name,
+            'role': user.role,
+        },
+        'settings': {
+            'base_url': settings['base_url'],
+            'verify_tls': settings['verify_tls'],
+            'has_api_key': bool(settings['api_key']),
+            'api_key_hint': _workbench_api_key_hint(settings['api_key']),
+            'owui_model_id': settings['owui_model_id'],
+            'owui_function_id': settings['owui_function_id'],
+            'workbench_server_id': settings['workbench_server_id'],
+            'workbench_project_id': settings['workbench_project_id'],
+            'workbench_branch_id': settings['workbench_branch_id'],
+            'workbench_branch_model_id': settings['workbench_branch_model_id'],
+            'updated_at': settings['updated_at'] or None,
+        },
+        'notes': {
+            'same_sso': 'The current OWUI session user is shown here. The Workbench API key should belong to this same SSO user.',
+            'local_host_hint': 'When Workbench runs on this same device, the localhost hop stays fast and the bigger cost remains the model call itself.',
+        },
+    }
+
+
+class WorkbenchConfigForm(BaseModel):
+    base_url: str = ''
+    api_key: str = ''
+    verify_tls: bool = False
+    owui_model_id: str = ''
+    owui_function_id: str = ''
+    workbench_server_id: str = ''
+    workbench_project_id: str = ''
+    workbench_branch_id: str = ''
+    workbench_branch_model_id: str = ''
+
+
+def _merge_workbench_ui_settings(user, payload: dict) -> dict:
+    merged_settings = dict(user.settings or {})
+    merged_ui_settings = dict(merged_settings.get('ui') or {})
+    existing_workbench = dict(merged_ui_settings.get(TWC_WORKBENCH_SETTINGS_KEY) or {})
+    existing_workbench.update(payload)
+    merged_ui_settings[TWC_WORKBENCH_SETTINGS_KEY] = existing_workbench
+    merged_settings['ui'] = merged_ui_settings
+    return merged_settings
+
+
+def _quote_workbench_path(value: str) -> str:
+    return urllib.parse.quote(str(value), safe='')
+
+
+async def _workbench_api_json(user, method: str, path: str) -> Any:
+    settings = _get_workbench_user_settings(user)
+    if not settings['base_url']:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Save a Workbench base URL first.')
+    if not settings['api_key']:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Save a Workbench API key first.')
+
+    upstream_url = f"{settings['base_url']}{path}"
+    ssl_value = AIOHTTP_CLIENT_SESSION_SSL if settings['verify_tls'] else False
+
+    try:
+        async with ClientSession(trust_env=True) as session:
+            async with session.request(
+                method,
+                upstream_url,
+                headers={
+                    'Authorization': f"Bearer {settings['api_key']}",
+                    'Accept': 'application/json',
+                },
+                ssl=ssl_value,
+            ) as response:
+                raw_text = await response.text()
+                parsed_json = None
+                if raw_text:
+                    try:
+                        parsed_json = json.loads(raw_text)
+                    except Exception:
+                        parsed_json = None
+
+                if response.status >= 400:
+                    detail = response.reason
+                    if isinstance(parsed_json, dict):
+                        detail = parsed_json.get('detail') or parsed_json.get('message') or detail
+                    elif raw_text:
+                        detail = raw_text
+
+                    status_code = (
+                        response.status
+                        if response.status in {400, 401, 403, 404, 409, 422}
+                        else status.HTTP_502_BAD_GATEWAY
+                    )
+                    raise HTTPException(status_code=status_code, detail=f'Workbench: {detail}')
+
+                if parsed_json is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                        detail='Workbench returned a non-JSON response.',
+                    )
+
+                return parsed_json
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f'Workbench request failed: {exc}',
+        ) from exc
+
+
+def _build_workbench_ui_html(user) -> str:
+    bootstrap = json.dumps(
+        {
+            'context': _build_workbench_context_payload(user),
+            'endpoints': {
+                'context': '/api/v1/auths/workbench/context',
+                'manifest': '/api/v1/auths/workbench/cache/manifest',
+                'servers': '/api/v1/auths/workbench/cache/servers',
+                'projects': '/api/v1/auths/workbench/cache/projects',
+                'branch_summary': '/api/v1/auths/workbench/cache/branch/summary',
+                'branch_models': '/api/v1/auths/workbench/cache/branch/models',
+                'owui_models': '/api/models',
+                'owui_functions': '/api/v1/functions/',
+            },
+        }
+    )
+
+    return (
+        """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OWUI Workbench Bridge</title>
+  <style>
+    :root {
+      --page-bg: linear-gradient(180deg, #f8fafc 0%, #e2e8f0 100%);
+      --panel-bg: rgba(255, 255, 255, 0.92);
+      --panel-border: rgba(148, 163, 184, 0.26);
+      --text-main: #0f172a;
+      --text-muted: #475569;
+      --accent: #0f766e;
+      --accent-strong: #155e75;
+      --accent-soft: rgba(15, 118, 110, 0.12);
+      --shadow: 0 20px 60px rgba(15, 23, 42, 0.1);
+      --warning-bg: rgba(251, 191, 36, 0.12);
+      --warning-text: #92400e;
+      --success-text: #166534;
+      --error-text: #b91c1c;
+    }
+    * { box-sizing: border-box; }
+    html, body { min-height: 100%; }
+    body {
+      margin: 0;
+      font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+      color: var(--text-main);
+      background: var(--page-bg);
+    }
+    .shell {
+      width: min(1180px, calc(100vw - 28px));
+      margin: 0 auto;
+      padding: 20px 0 28px;
+    }
+    .hero,
+    .panel {
+      background: var(--panel-bg);
+      border: 1px solid var(--panel-border);
+      border-radius: 26px;
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(14px);
+    }
+    .hero {
+      padding: 28px;
+      background:
+        radial-gradient(circle at top left, rgba(15, 118, 110, 0.14), transparent 42%),
+        radial-gradient(circle at top right, rgba(21, 94, 117, 0.12), transparent 36%),
+        var(--panel-bg);
+    }
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    h1 {
+      margin: 16px 0 10px;
+      font-size: clamp(30px, 4vw, 42px);
+      line-height: 1.03;
+      letter-spacing: -0.03em;
+    }
+    .lede {
+      margin: 0;
+      max-width: 76ch;
+      color: var(--text-muted);
+      font-size: 15px;
+      line-height: 1.7;
+    }
+    .meta-grid,
+    .summary-grid,
+    .section-grid {
+      display: grid;
+      gap: 16px;
+    }
+    .meta-grid {
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      margin-top: 22px;
+    }
+    .summary-grid {
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      margin-top: 16px;
+    }
+    .section-grid {
+      margin-top: 18px;
+    }
+    .meta-card,
+    .summary-card {
+      border: 1px solid rgba(148, 163, 184, 0.24);
+      border-radius: 20px;
+      background: rgba(255, 255, 255, 0.7);
+      padding: 18px 20px;
+    }
+    .meta-card strong,
+    .summary-card strong {
+      display: block;
+      margin-bottom: 8px;
+      color: var(--text-muted);
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    .meta-card code,
+    .summary-value code {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 8px;
+      background: rgba(15, 23, 42, 0.05);
+      font-family: Consolas, monospace;
+      font-size: 12px;
+    }
+    .meta-card .value,
+    .summary-value {
+      font-size: 14px;
+      font-weight: 600;
+      line-height: 1.55;
+      overflow-wrap: anywhere;
+    }
+    .panel {
+      padding: 24px;
+      margin-top: 18px;
+    }
+    .panel h2 {
+      margin: 0 0 6px;
+      font-size: 24px;
+      letter-spacing: -0.02em;
+    }
+    .panel p.copy {
+      margin: 0 0 18px;
+      color: var(--text-muted);
+      font-size: 14px;
+      line-height: 1.65;
+    }
+    .field-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1.05fr) minmax(260px, 0.95fr);
+      gap: 16px;
+      align-items: start;
+      padding: 18px;
+      border-radius: 20px;
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      background: rgba(255, 255, 255, 0.7);
+    }
+    .label-block strong {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 15px;
+    }
+    .label-block span {
+      color: var(--text-muted);
+      font-size: 13px;
+      line-height: 1.55;
+    }
+    input[type="text"],
+    input[type="password"],
+    select {
+      width: 100%;
+      min-height: 48px;
+      padding: 12px 14px;
+      border: 1px solid rgba(148, 163, 184, 0.35);
+      border-radius: 16px;
+      background: rgba(255, 255, 255, 0.96);
+      color: var(--text-main);
+      font: inherit;
+      outline: none;
+    }
+    input:focus,
+    select:focus {
+      border-color: rgba(15, 118, 110, 0.72);
+      box-shadow: 0 0 0 4px rgba(15, 118, 110, 0.12);
+    }
+    select:disabled,
+    input:disabled {
+      cursor: not-allowed;
+      opacity: 0.7;
+      background: rgba(226, 232, 240, 0.55);
+    }
+    .field-stack {
+      display: grid;
+      gap: 10px;
+    }
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 14px;
+      border-radius: 16px;
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      background: rgba(255, 255, 255, 0.72);
+    }
+    .toggle-row input {
+      width: 18px;
+      height: 18px;
+      accent-color: var(--accent);
+    }
+    .hint,
+    .warning {
+      padding: 14px 16px;
+      border-radius: 18px;
+      font-size: 13px;
+      line-height: 1.55;
+    }
+    .hint {
+      background: rgba(15, 118, 110, 0.08);
+      color: var(--accent-strong);
+      border: 1px solid rgba(15, 118, 110, 0.18);
+    }
+    .warning {
+      background: var(--warning-bg);
+      color: var(--warning-text);
+      border: 1px solid rgba(245, 158, 11, 0.22);
+    }
+    .status {
+      min-height: 24px;
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+    .status.success { color: var(--success-text); }
+    .status.error { color: var(--error-text); }
+    .pill-row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .pill {
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: rgba(15, 118, 110, 0.1);
+      color: var(--accent-strong);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+    .actions {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-top: 18px;
+    }
+    .button-row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    button {
+      border: 0;
+      border-radius: 16px;
+      min-height: 48px;
+      padding: 0 18px;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    button.primary {
+      background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+      color: white;
+      box-shadow: 0 14px 30px rgba(21, 94, 117, 0.24);
+    }
+    button.secondary {
+      background: rgba(255, 255, 255, 0.8);
+      color: var(--text-main);
+      border: 1px solid rgba(148, 163, 184, 0.28);
+    }
+    @media (max-width: 940px) {
+      .shell { width: min(100vw - 16px, 1180px); }
+      .hero, .panel { padding: 20px; border-radius: 22px; }
+      .field-row { grid-template-columns: 1fr; }
+      .actions { flex-direction: column; align-items: flex-start; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="hero">
+      <div class="eyebrow">OWUI Workbench Bridge</div>
+      <h1>Route OWUI model work through your Workbench cache without sending users back to a separate chat.</h1>
+      <p class="lede">
+        Use this panel to bind the current OWUI user to a local Workbench cache connection, pick the OWUI model or function you want in play,
+        and lock the engineering context down to one stored server, project, branch, and branch model.
+      </p>
+      <div class="meta-grid">
+        <div class="meta-card">
+          <strong>Current OWUI User</strong>
+          <div class="value" id="owui-user-card"></div>
+        </div>
+        <div class="meta-card">
+          <strong>Workbench API Identity</strong>
+          <div class="value" id="workbench-user-card">Not connected yet.</div>
+        </div>
+        <div class="meta-card">
+          <strong>Saved Connection</strong>
+          <div class="value" id="connection-card">No Workbench base URL saved yet.</div>
+        </div>
+      </div>
+      <div class="warning" style="margin-top:16px;" id="same-sso-note"></div>
+    </section>
+
+    <form id="workbench-form">
+      <section class="panel">
+        <h2>Connection</h2>
+        <p class="copy">Keep the bridge light. Workbench remains the source of truth for TWC cache data, and OWUI stays the primary chat surface.</p>
+        <div class="section-grid">
+          <label class="field-row">
+            <div class="label-block">
+              <strong>Workbench Base URL</strong>
+              <span>Point this at the Workbench backend on this machine, for example <code>http://127.0.0.1:8000</code> or the local Caddy URL you already use.</span>
+            </div>
+            <div class="field-stack">
+              <input id="base_url" type="text" placeholder="http://127.0.0.1:8000" autocomplete="off">
+              <label class="toggle-row">
+                <span>Verify TLS certificates for this Workbench URL</span>
+                <input id="verify_tls" type="checkbox">
+              </label>
+            </div>
+          </label>
+          <label class="field-row">
+            <div class="label-block">
+              <strong>Workbench Cache API Key</strong>
+              <span>Use a Workbench API key created by this same user. The full key is never shown again after save; OWUI only tells you whether one is already stored.</span>
+            </div>
+            <div class="field-stack">
+              <input id="api_key" type="password" autocomplete="new-password" placeholder="Paste Workbench API key only when saving or rotating it">
+              <div class="hint" id="api-key-hint">No Workbench API key is currently stored for this OWUI user.</div>
+            </div>
+          </label>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>OWUI Routing</h2>
+        <p class="copy">Choose the OWUI-side model and optional function/agent slot you want this engineering context to target.</p>
+        <div class="section-grid">
+          <label class="field-row">
+            <div class="label-block">
+              <strong>OWUI Model</strong>
+              <span>All models visible to this signed-in OWUI user appear here.</span>
+            </div>
+            <div class="field-stack">
+              <select id="owui_model_id"></select>
+            </div>
+          </label>
+          <label class="field-row">
+            <div class="label-block">
+              <strong>OWUI Agent / Function</strong>
+              <span>Optional. Pick the function or agent-like function set you want paired with the model when you use this Workbench context.</span>
+            </div>
+            <div class="field-stack">
+              <select id="owui_function_id"></select>
+            </div>
+          </label>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Workbench Context</h2>
+        <p class="copy">Selections come directly from the Workbench cache API. Project options include their cached branch list so branch selection stays error-proof.</p>
+        <div class="section-grid">
+          <label class="field-row">
+            <div class="label-block">
+              <strong>TWC Server</strong>
+              <span>Choose which cached Workbench server snapshot this chat context should read from.</span>
+            </div>
+            <div class="field-stack">
+              <select id="workbench_server_id"></select>
+            </div>
+          </label>
+          <label class="field-row">
+            <div class="label-block">
+              <strong>Project</strong>
+              <span>Only projects visible to this Workbench API user are shown.</span>
+            </div>
+            <div class="field-stack">
+              <select id="workbench_project_id"></select>
+            </div>
+          </label>
+          <label class="field-row">
+            <div class="label-block">
+              <strong>Branch</strong>
+              <span>Branch options are sourced from the selected cached project entry.</span>
+            </div>
+            <div class="field-stack">
+              <select id="workbench_branch_id"></select>
+            </div>
+          </label>
+          <label class="field-row">
+            <div class="label-block">
+              <strong>Branch Model</strong>
+              <span>Optional. Narrow the context to one cached branch model when you do not want the whole branch in play.</span>
+            </div>
+            <div class="field-stack">
+              <select id="workbench_branch_model_id"></select>
+            </div>
+          </label>
+        </div>
+        <div class="summary-grid" id="branch-summary-grid">
+          <div class="summary-card">
+            <strong>Status</strong>
+            <div class="summary-value" id="summary-status">Pick a branch to inspect.</div>
+          </div>
+          <div class="summary-card">
+            <strong>Revision</strong>
+            <div class="summary-value" id="summary-revision">-</div>
+          </div>
+          <div class="summary-card">
+            <strong>Models</strong>
+            <div class="summary-value" id="summary-model-count">-</div>
+          </div>
+          <div class="summary-card">
+            <strong>Elements</strong>
+            <div class="summary-value" id="summary-element-count">-</div>
+          </div>
+          <div class="summary-card">
+            <strong>Updated</strong>
+            <div class="summary-value" id="summary-updated">-</div>
+          </div>
+        </div>
+        <div class="pill-row" id="manifest-scopes" style="margin-top:14px;"></div>
+      </section>
+
+      <div class="actions">
+        <div id="status" class="status"></div>
+        <div class="button-row">
+          <button class="secondary" id="reload-button" type="button">Reload Lists</button>
+          <button class="secondary" id="clear-button" type="button">Clear Saved Bridge</button>
+          <button class="primary" id="save-button" type="submit">Save Workbench Bridge</button>
+        </div>
+      </div>
+    </form>
+  </div>
+
+  <script>window.__OWUI_WORKBENCH_BOOT__ = __BOOTSTRAP__;</script>
+  <script>
+    (() => {
+      const boot = window.__OWUI_WORKBENCH_BOOT__;
+      const state = {
+        context: boot.context,
+        models: [],
+        functions: [],
+        manifest: null,
+        servers: [],
+        projects: [],
+        branchModels: [],
+        branchSummary: null,
+      };
+
+      const byId = (id) => document.getElementById(id);
+      const statusEl = byId('status');
+
+      const authHeaders = () => {
+        const token = window.localStorage?.getItem('token');
+        return token ? { Authorization: `Bearer ${token}` } : {};
+      };
+
+      const fetchJson = async (url, options = {}) => {
+        const response = await fetch(url, {
+          credentials: 'same-origin',
+          headers: {
+            Accept: 'application/json',
+            ...authHeaders(),
+            ...(options.headers || {}),
+          },
+          ...options,
+        });
+        if (!response.ok) {
+          let detail = response.statusText || `HTTP ${response.status}`;
+          try {
+            const payload = await response.json();
+            detail = payload.detail || payload.message || detail;
+          } catch (error) {
+            // Ignore body parsing failures here.
+          }
+          throw new Error(detail);
+        }
+        return response.json();
+      };
+
+      const setStatus = (message, kind = '') => {
+        statusEl.textContent = message || '';
+        statusEl.className = kind ? `status ${kind}` : 'status';
+      };
+
+      const formatDate = (value) => {
+        if (!value) {
+          return '-';
+        }
+        try {
+          return new Date(value).toLocaleString();
+        } catch (error) {
+          return value;
+        }
+      };
+
+      const optionLabel = (value, fallback = '') => {
+        if (value === null || value === undefined || value === '') {
+          return fallback;
+        }
+        return String(value);
+      };
+
+      const populateSelect = (selectId, entries, selectedValue, placeholder, mapOption) => {
+        const select = byId(selectId);
+        select.innerHTML = '';
+
+        const placeholderOption = document.createElement('option');
+        placeholderOption.value = '';
+        placeholderOption.textContent = placeholder;
+        select.appendChild(placeholderOption);
+
+        for (const entry of entries) {
+          const optionData = mapOption(entry);
+          const option = document.createElement('option');
+          option.value = optionData.value;
+          option.textContent = optionData.label;
+          select.appendChild(option);
+        }
+
+        if (selectedValue && entries.some((entry) => mapOption(entry).value === selectedValue)) {
+          select.value = selectedValue;
+        } else {
+          select.value = '';
+        }
+      };
+
+      const updateMetaCards = () => {
+        const context = state.context || { user: {}, settings: {} };
+        const settings = context.settings || {};
+        const user = context.user || {};
+        byId('owui-user-card').innerHTML = `
+          <div>${optionLabel(user.name, 'Unknown user')}</div>
+          <div style="color:var(--text-muted);font-weight:500;">${optionLabel(user.email, 'No email')} · ${optionLabel(user.role, 'user')}</div>
+        `;
+        byId('same-sso-note').textContent = context.notes?.same_sso || '';
+        byId('connection-card').innerHTML = settings.base_url
+          ? `<div>${settings.base_url}</div><div style="color:var(--text-muted);font-weight:500;">Stored key: ${settings.api_key_hint || 'hidden'} · TLS verify: ${settings.verify_tls ? 'On' : 'Off'}</div>`
+          : 'No Workbench base URL saved yet.';
+        byId('api-key-hint').textContent = settings.has_api_key
+          ? `A Workbench API key is already stored for this OWUI user (${settings.api_key_hint || 'hidden'}). Leave the field blank unless you want to rotate it.`
+          : 'No Workbench API key is currently stored for this OWUI user.';
+      };
+
+      const fillFormFromContext = () => {
+        const settings = (state.context || {}).settings || {};
+        byId('base_url').value = settings.base_url || '';
+        byId('api_key').value = '';
+        byId('verify_tls').checked = !!settings.verify_tls;
+      };
+
+      const updateSummaryCards = () => {
+        const summary = state.branchSummary;
+        byId('summary-status').textContent = summary?.status || 'Pick a branch to inspect.';
+        byId('summary-revision').textContent = summary?.latest_revision || '-';
+        byId('summary-model-count').textContent = summary?.model_count ?? '-';
+        byId('summary-element-count').textContent = summary?.element_count ?? '-';
+        byId('summary-updated').textContent = formatDate(summary?.updated_at);
+      };
+
+      const updateManifestArea = () => {
+        const manifestHost = byId('manifest-scopes');
+        manifestHost.innerHTML = '';
+        const manifest = state.manifest;
+        byId('workbench-user-card').innerHTML = manifest
+          ? `<div>${optionLabel(manifest.preferred_username, 'Unknown')}</div><div style="color:var(--text-muted);font-weight:500;">Token source: ${optionLabel(manifest.source, 'unknown')}</div>`
+          : 'Not connected yet.';
+
+        for (const scope of manifest?.scopes || []) {
+          const pill = document.createElement('div');
+          pill.className = 'pill';
+          pill.textContent = scope;
+          manifestHost.appendChild(pill);
+        }
+      };
+
+      const updateOwuiSelectors = () => {
+        const settings = (state.context || {}).settings || {};
+        populateSelect(
+          'owui_model_id',
+          state.models,
+          settings.owui_model_id,
+          'Choose an OWUI model',
+          (entry) => ({
+            value: entry.id,
+            label: entry.name || entry.id,
+          }),
+        );
+        populateSelect(
+          'owui_function_id',
+          state.functions,
+          settings.owui_function_id,
+          'Optional: no function / agent override',
+          (entry) => ({
+            value: entry.id,
+            label: [entry.name || entry.id, entry.type || 'function'].filter(Boolean).join(' · '),
+          }),
+        );
+      };
+
+      const currentProject = () => {
+        const projectId = byId('workbench_project_id').value;
+        return state.projects.find((entry) => entry.project_id === projectId) || null;
+      };
+
+      const updateProjectAndBranchSelectors = () => {
+        const settings = (state.context || {}).settings || {};
+        populateSelect(
+          'workbench_project_id',
+          state.projects,
+          byId('workbench_project_id').value || settings.workbench_project_id,
+          'Choose a Workbench project',
+          (entry) => ({
+            value: entry.project_id,
+            label: entry.project_name || entry.project_id,
+          }),
+        );
+
+        const project = currentProject();
+        populateSelect(
+          'workbench_branch_id',
+          project?.branches || [],
+          byId('workbench_branch_id').value || settings.workbench_branch_id,
+          'Choose a cached branch',
+          (entry) => ({
+            value: entry.branch_id,
+            label: entry.branch_name || entry.branch_id,
+          }),
+        );
+      };
+
+      const updateServerSelector = () => {
+        const settings = (state.context || {}).settings || {};
+        populateSelect(
+          'workbench_server_id',
+          state.servers,
+          byId('workbench_server_id').value || settings.workbench_server_id,
+          'Choose a Workbench server',
+          (entry) => ({
+            value: entry.server_id,
+            label: `${entry.server_name || entry.server_id} (${entry.project_count} projects / ${entry.branch_count} branches)`,
+          }),
+        );
+      };
+
+      const updateBranchModelSelector = () => {
+        const settings = (state.context || {}).settings || {};
+        populateSelect(
+          'workbench_branch_model_id',
+          state.branchModels,
+          settings.workbench_branch_model_id,
+          'Optional: entire branch context',
+          (entry) => ({
+            value: entry.model_id || entry.id || '',
+            label: entry.model_name || entry.name || entry.model_id || entry.id || 'Unnamed model',
+          }),
+        );
+      };
+
+      const readFormPayload = () => ({
+        base_url: byId('base_url').value.trim(),
+        api_key: byId('api_key').value.trim(),
+        verify_tls: byId('verify_tls').checked,
+        owui_model_id: byId('owui_model_id').value,
+        owui_function_id: byId('owui_function_id').value,
+        workbench_server_id: byId('workbench_server_id').value,
+        workbench_project_id: byId('workbench_project_id').value,
+        workbench_branch_id: byId('workbench_branch_id').value,
+        workbench_branch_model_id: byId('workbench_branch_model_id').value,
+      });
+
+      const disableWorkbenchSelectors = (disabled) => {
+        [
+          'workbench_server_id',
+          'workbench_project_id',
+          'workbench_branch_id',
+          'workbench_branch_model_id',
+        ].forEach((id) => {
+          byId(id).disabled = disabled;
+        });
+      };
+
+      const loadOwuiOptions = async () => {
+        const [modelsPayload, functionsPayload] = await Promise.all([
+          fetchJson(boot.endpoints.owui_models),
+          fetchJson(boot.endpoints.owui_functions),
+        ]);
+        state.models = Array.isArray(modelsPayload?.data) ? modelsPayload.data : [];
+        state.functions = Array.isArray(functionsPayload) ? functionsPayload : [];
+        updateOwuiSelectors();
+      };
+
+      const loadManifestAndServers = async () => {
+        const contextSettings = (state.context || {}).settings || {};
+        if (!contextSettings.base_url || !contextSettings.has_api_key) {
+          state.manifest = null;
+          state.servers = [];
+          state.projects = [];
+          state.branchModels = [];
+          state.branchSummary = null;
+          updateManifestArea();
+          updateServerSelector();
+          updateProjectAndBranchSelectors();
+          updateBranchModelSelector();
+          updateSummaryCards();
+          disableWorkbenchSelectors(true);
+          return;
+        }
+
+        disableWorkbenchSelectors(false);
+        state.manifest = await fetchJson(boot.endpoints.manifest);
+        state.servers = await fetchJson(boot.endpoints.servers);
+        updateManifestArea();
+        updateServerSelector();
+      };
+
+      const loadProjectsForSelectedServer = async (preferredProjectId = '') => {
+        const serverId = byId('workbench_server_id').value;
+        state.projects = [];
+        state.branchModels = [];
+        state.branchSummary = null;
+        updateProjectAndBranchSelectors();
+        updateBranchModelSelector();
+        updateSummaryCards();
+
+        if (!serverId) {
+          return;
+        }
+
+        const payload = await fetchJson(`${boot.endpoints.projects}?server_id=${encodeURIComponent(serverId)}`);
+        state.projects = Array.isArray(payload) ? payload : [];
+        updateProjectAndBranchSelectors();
+
+        if (preferredProjectId && state.projects.some((entry) => entry.project_id === preferredProjectId)) {
+          byId('workbench_project_id').value = preferredProjectId;
+          updateProjectAndBranchSelectors();
+        }
+      };
+
+      const loadBranchDetails = async (preferredBranchModelId = '') => {
+        const serverId = byId('workbench_server_id').value;
+        const projectId = byId('workbench_project_id').value;
+        const branchId = byId('workbench_branch_id').value;
+        state.branchModels = [];
+        state.branchSummary = null;
+        updateBranchModelSelector();
+        updateSummaryCards();
+
+        if (!serverId || !projectId || !branchId) {
+          return;
+        }
+
+        const summaryUrl = `${boot.endpoints.branch_summary}?server_id=${encodeURIComponent(serverId)}&project_id=${encodeURIComponent(projectId)}&branch_id=${encodeURIComponent(branchId)}`;
+        const modelsUrl = `${boot.endpoints.branch_models}?server_id=${encodeURIComponent(serverId)}&project_id=${encodeURIComponent(projectId)}&branch_id=${encodeURIComponent(branchId)}`;
+        const [summaryPayload, modelsPayload] = await Promise.all([
+          fetchJson(summaryUrl),
+          fetchJson(modelsUrl),
+        ]);
+        state.branchSummary = summaryPayload || null;
+        state.branchModels = Array.isArray(modelsPayload) ? modelsPayload : [];
+        updateSummaryCards();
+        updateBranchModelSelector();
+
+        if (
+          preferredBranchModelId &&
+          state.branchModels.some((entry) => (entry.model_id || entry.id || '') === preferredBranchModelId)
+        ) {
+          byId('workbench_branch_model_id').value = preferredBranchModelId;
+        }
+      };
+
+      const reloadAll = async () => {
+        setStatus('Loading OWUI and Workbench options...');
+        state.context = await fetchJson(boot.endpoints.context);
+        fillFormFromContext();
+        updateMetaCards();
+        await loadOwuiOptions();
+        await loadManifestAndServers();
+
+        const settings = (state.context || {}).settings || {};
+        if (settings.workbench_server_id) {
+          byId('workbench_server_id').value = settings.workbench_server_id;
+          await loadProjectsForSelectedServer(settings.workbench_project_id);
+        }
+        if (settings.workbench_project_id) {
+          byId('workbench_project_id').value = settings.workbench_project_id;
+          updateProjectAndBranchSelectors();
+        }
+        if (settings.workbench_branch_id) {
+          byId('workbench_branch_id').value = settings.workbench_branch_id;
+          await loadBranchDetails(settings.workbench_branch_model_id);
+        }
+
+        setStatus('Workbench bridge ready.');
+      };
+
+      byId('workbench_server_id').addEventListener('change', async () => {
+        try {
+          setStatus('Loading projects for the selected Workbench server...');
+          await loadProjectsForSelectedServer();
+          setStatus('Project list updated.');
+        } catch (error) {
+          setStatus(error.message || String(error), 'error');
+        }
+      });
+
+      byId('workbench_project_id').addEventListener('change', async () => {
+        try {
+          updateProjectAndBranchSelectors();
+          await loadBranchDetails();
+          setStatus('Branch list updated.');
+        } catch (error) {
+          setStatus(error.message || String(error), 'error');
+        }
+      });
+
+      byId('workbench_branch_id').addEventListener('change', async () => {
+        try {
+          setStatus('Loading branch summary and cached branch models...');
+          await loadBranchDetails();
+          setStatus('Branch details loaded.');
+        } catch (error) {
+          setStatus(error.message || String(error), 'error');
+        }
+      });
+
+      byId('reload-button').addEventListener('click', async () => {
+        try {
+          await reloadAll();
+        } catch (error) {
+          setStatus(error.message || String(error), 'error');
+        }
+      });
+
+      byId('clear-button').addEventListener('click', async () => {
+        try {
+          setStatus('Clearing the saved Workbench bridge...');
+          await fetchJson(boot.endpoints.context, { method: 'DELETE' });
+          await reloadAll();
+          setStatus('Saved Workbench bridge cleared.', 'success');
+        } catch (error) {
+          setStatus(error.message || String(error), 'error');
+        }
+      });
+
+      byId('workbench-form').addEventListener('submit', async (event) => {
+        event.preventDefault();
+        try {
+          setStatus('Saving the Workbench bridge...');
+          state.context = await fetchJson(boot.endpoints.context, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(readFormPayload()),
+          });
+          fillFormFromContext();
+          updateMetaCards();
+          await loadManifestAndServers();
+          if (state.context.settings.workbench_server_id) {
+            byId('workbench_server_id').value = state.context.settings.workbench_server_id;
+            await loadProjectsForSelectedServer(state.context.settings.workbench_project_id);
+          }
+          if (state.context.settings.workbench_branch_id) {
+            byId('workbench_branch_id').value = state.context.settings.workbench_branch_id;
+            await loadBranchDetails(state.context.settings.workbench_branch_model_id);
+          }
+          setStatus('Workbench bridge saved for this OWUI user.', 'success');
+        } catch (error) {
+          setStatus(error.message || String(error), 'error');
+        }
+      });
+
+      fillFormFromContext();
+      updateMetaCards();
+      updateSummaryCards();
+      updateManifestArea();
+      disableWorkbenchSelectors(true);
+      reloadAll().catch((error) => {
+        setStatus(error.message || String(error), 'error');
+      });
+    })();
+  </script>
+</body>
+</html>
+"""
+        .replace('__BOOTSTRAP__', bootstrap)
+    )
+
+
+@router.get('/workbench/context')
+async def get_workbench_context(user=Depends(get_verified_user)):
+    return _build_workbench_context_payload(user)
+
+
+@router.post('/workbench/context')
+async def update_workbench_context(
+    form_data: WorkbenchConfigForm,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    normalized_base_url = _normalize_workbench_base_url(form_data.base_url)
+    if normalized_base_url and not normalized_base_url.startswith(('http://', 'https://')):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Workbench base URL must start with http:// or https://.')
+
+    existing = _get_workbench_user_settings(user)
+    merged_settings = _merge_workbench_ui_settings(
+        user,
+        {
+            'base_url': normalized_base_url,
+            'api_key': _normalize_optional_text(form_data.api_key) or existing['api_key'],
+            'verify_tls': bool(form_data.verify_tls),
+            'owui_model_id': _normalize_optional_text(form_data.owui_model_id),
+            'owui_function_id': _normalize_optional_text(form_data.owui_function_id),
+            'workbench_server_id': _normalize_optional_text(form_data.workbench_server_id),
+            'workbench_project_id': _normalize_optional_text(form_data.workbench_project_id),
+            'workbench_branch_id': _normalize_optional_text(form_data.workbench_branch_id),
+            'workbench_branch_model_id': _normalize_optional_text(form_data.workbench_branch_model_id),
+            'updated_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        },
+    )
+
+    updated_user = await Users.update_user_settings_by_id(user.id, merged_settings, db=db)
+    if updated_user is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=ERROR_MESSAGES.USER_NOT_FOUND)
+
+    return _build_workbench_context_payload(updated_user)
+
+
+@router.delete('/workbench/context')
+async def clear_workbench_context(user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session)):
+    merged_settings = dict(user.settings or {})
+    merged_ui_settings = dict(merged_settings.get('ui') or {})
+    merged_ui_settings.pop(TWC_WORKBENCH_SETTINGS_KEY, None)
+    merged_settings['ui'] = merged_ui_settings
+
+    updated_user = await Users.update_user_settings_by_id(user.id, merged_settings, db=db)
+    if updated_user is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=ERROR_MESSAGES.USER_NOT_FOUND)
+
+    return _build_workbench_context_payload(updated_user)
+
+
+@router.get('/workbench/ui', response_class=HTMLResponse)
+async def get_workbench_ui(user=Depends(get_verified_user)):
+    return HTMLResponse(_build_workbench_ui_html(user))
+
+
+@router.get('/workbench/cache/manifest')
+async def get_workbench_cache_manifest(user=Depends(get_verified_user)):
+    return await _workbench_api_json(user, 'GET', '/api/cache')
+
+
+@router.get('/workbench/cache/servers')
+async def get_workbench_cache_servers(user=Depends(get_verified_user)):
+    return await _workbench_api_json(user, 'GET', '/api/cache/servers')
+
+
+@router.get('/workbench/cache/projects')
+async def get_workbench_cache_projects(server_id: str, user=Depends(get_verified_user)):
+    normalized_server_id = _normalize_optional_text(server_id)
+    if not normalized_server_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Workbench server id is required.')
+
+    return await _workbench_api_json(
+        user,
+        'GET',
+        f"/api/cache/servers/{_quote_workbench_path(normalized_server_id)}/projects",
+    )
+
+
+@router.get('/workbench/cache/branch/summary')
+async def get_workbench_branch_summary(
+    server_id: str,
+    project_id: str,
+    branch_id: str,
+    user=Depends(get_verified_user),
+):
+    normalized_server_id = _normalize_optional_text(server_id)
+    normalized_project_id = _normalize_optional_text(project_id)
+    normalized_branch_id = _normalize_optional_text(branch_id)
+    if not normalized_server_id or not normalized_project_id or not normalized_branch_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Workbench server, project, and branch selections are required.',
+        )
+
+    return await _workbench_api_json(
+        user,
+        'GET',
+        f"/api/cache/servers/{_quote_workbench_path(normalized_server_id)}/projects/{_quote_workbench_path(normalized_project_id)}/branches/{_quote_workbench_path(normalized_branch_id)}/summary",
+    )
+
+
+@router.get('/workbench/cache/branch/models')
+async def get_workbench_branch_models(
+    server_id: str,
+    project_id: str,
+    branch_id: str,
+    user=Depends(get_verified_user),
+):
+    normalized_server_id = _normalize_optional_text(server_id)
+    normalized_project_id = _normalize_optional_text(project_id)
+    normalized_branch_id = _normalize_optional_text(branch_id)
+    if not normalized_server_id or not normalized_project_id or not normalized_branch_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Workbench server, project, and branch selections are required.',
+        )
+
+    return await _workbench_api_json(
+        user,
+        'GET',
+        f"/api/cache/servers/{_quote_workbench_path(normalized_server_id)}/projects/{_quote_workbench_path(normalized_project_id)}/branches/{_quote_workbench_path(normalized_branch_id)}/models",
+    )
 
 
 class LdapServerConfig(BaseModel):

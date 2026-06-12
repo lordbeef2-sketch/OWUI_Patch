@@ -6,6 +6,7 @@ This package recreates the local OWUI changes we made for:
 
 - TWC OIDC sign-in flow that lands back in OWUI already logged in
 - `Admin Panel -> Settings -> SSO`
+- left-sidebar `Workbench` bridge panel inside OWUI with per-user Workbench selectors
 - dropdown-based SSO claim mapping UI
 - native PDF extraction with Tesseract fallback for scanned pages
 - uploaded image OCR for agents using Tesseract
