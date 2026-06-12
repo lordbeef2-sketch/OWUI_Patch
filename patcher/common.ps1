@@ -205,6 +205,168 @@ print(json.dumps({
   }
 }
 
+
+function Test-OpenWebUiPackageRoot([string]$PackageRoot) {
+  if ([string]::IsNullOrWhiteSpace($PackageRoot) -or -not (Test-Path $PackageRoot)) {
+    return $false
+  }
+
+  $item = Get-Item -LiteralPath $PackageRoot
+  if (-not $item.PSIsContainer) {
+    return $false
+  }
+
+  $required = @('config.py', 'main.py')
+  foreach ($leaf in $required) {
+    if (-not (Test-Path (Join-Path $PackageRoot $leaf))) {
+      return $false
+    }
+  }
+
+  return $true
+}
+
+function Get-OpenWebUiVersionFromPackageRoot([string]$PackageRoot) {
+  try {
+    $sitePackagesRoot = Split-Path -Parent $PackageRoot
+    $distInfo = Get-ChildItem -LiteralPath $sitePackagesRoot -Directory -ErrorAction SilentlyContinue |
+      Where-Object { $_.Name -like 'open_webui-*.dist-info' -or $_.Name -like 'open-webui-*.dist-info' } |
+      Sort-Object Name -Descending |
+      Select-Object -First 1
+
+    if ($distInfo) {
+      $metadata = Join-Path $distInfo.FullName 'METADATA'
+      if (Test-Path $metadata) {
+        $line = Get-Content -Path $metadata -ErrorAction SilentlyContinue |
+          Where-Object { $_ -match '^Version:\s*(.+)$' } |
+          Select-Object -First 1
+        if ($line -and $line -match '^Version:\s*(.+)$') {
+          return $Matches[1].Trim()
+        }
+      }
+    }
+  } catch {
+    return ""
+  }
+
+  return ""
+}
+
+function New-OpenWebUiInstallInfoFromPackageRoot([string]$PackageRoot, [string]$PythonPath) {
+  $resolvedPackageRoot = (Resolve-Path -LiteralPath $PackageRoot).Path
+  $sitePackagesRoot = Split-Path -Parent $resolvedPackageRoot
+  $resolvedPython = ""
+  if (-not [string]::IsNullOrWhiteSpace($PythonPath) -and (Test-Path $PythonPath)) {
+    $resolvedPython = (Resolve-Path -LiteralPath $PythonPath).Path
+  }
+
+  return [pscustomobject]@{
+    python = $resolvedPython
+    package_root = $resolvedPackageRoot
+    site_packages = $sitePackagesRoot
+    version = (Get-OpenWebUiVersionFromPackageRoot -PackageRoot $resolvedPackageRoot)
+  }
+}
+
+function Add-UniqueString([System.Collections.Generic.List[string]]$List, [string]$Value) {
+  if ([string]::IsNullOrWhiteSpace($Value)) {
+    return
+  }
+
+  $trimmed = $Value.Trim()
+  foreach ($existing in $List) {
+    if ($existing -ieq $trimmed) {
+      return
+    }
+  }
+  $List.Add($trimmed) | Out-Null
+}
+
+function Get-LocalPythonCandidates([string]$RepoRoot) {
+  $items = [System.Collections.Generic.List[string]]::new()
+  $direct = @(
+    (Join-Path $RepoRoot '.venv\Scripts\python.exe'),
+    (Join-Path $RepoRoot 'venv\Scripts\python.exe'),
+    (Join-Path $RepoRoot 'env\Scripts\python.exe'),
+    (Join-Path $RepoRoot 'Scripts\python.exe'),
+    (Join-Path $RepoRoot 'python.exe')
+  )
+
+  foreach ($candidate in $direct) {
+    if (Test-Path $candidate) {
+      Add-UniqueString -List $items -Value ((Resolve-Path -LiteralPath $candidate).Path)
+    }
+  }
+
+  try {
+    Get-ChildItem -LiteralPath $RepoRoot -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object {
+      foreach ($relative in @('Scripts\python.exe', '.venv\Scripts\python.exe', 'venv\Scripts\python.exe')) {
+        $candidate = Join-Path $_.FullName $relative
+        if (Test-Path $candidate) {
+          Add-UniqueString -List $items -Value ((Resolve-Path -LiteralPath $candidate).Path)
+        }
+      }
+    }
+  } catch {
+  }
+
+  return @($items)
+}
+
+function Get-LocalOpenWebUiPackageCandidates([string]$RepoRoot) {
+  $items = [System.Collections.Generic.List[string]]::new()
+  $direct = @(
+    (Join-Path $RepoRoot 'open_webui'),
+    (Join-Path $RepoRoot 'src\open_webui'),
+    (Join-Path $RepoRoot 'Lib\site-packages\open_webui'),
+    (Join-Path $RepoRoot 'site-packages\open_webui'),
+    (Join-Path $RepoRoot '.venv\Lib\site-packages\open_webui'),
+    (Join-Path $RepoRoot 'venv\Lib\site-packages\open_webui'),
+    (Join-Path $RepoRoot 'env\Lib\site-packages\open_webui')
+  )
+
+  foreach ($candidate in $direct) {
+    if (Test-OpenWebUiPackageRoot -PackageRoot $candidate) {
+      Add-UniqueString -List $items -Value ((Resolve-Path -LiteralPath $candidate).Path)
+    }
+  }
+
+  try {
+    Get-ChildItem -LiteralPath $RepoRoot -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object {
+      foreach ($relative in @('Lib\site-packages\open_webui', 'site-packages\open_webui', 'src\open_webui', 'open_webui')) {
+        $candidate = Join-Path $_.FullName $relative
+        if (Test-OpenWebUiPackageRoot -PackageRoot $candidate) {
+          Add-UniqueString -List $items -Value ((Resolve-Path -LiteralPath $candidate).Path)
+        }
+      }
+    }
+  } catch {
+  }
+
+  return @($items)
+}
+
+function Select-OpenWebUiRootWithGui([string]$InitialDirectory) {
+  try {
+    Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+    $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+    $dialog.Description = 'Select the Open WebUI root folder. This should be the folder one level above patcher, or a folder containing open_webui / Lib\site-packages\open_webui.'
+    $dialog.ShowNewFolderButton = $false
+    if (-not [string]::IsNullOrWhiteSpace($InitialDirectory) -and (Test-Path $InitialDirectory)) {
+      $dialog.SelectedPath = (Resolve-Path -LiteralPath $InitialDirectory).Path
+    }
+
+    $result = $dialog.ShowDialog()
+    if ($result -eq [System.Windows.Forms.DialogResult]::OK -and -not [string]::IsNullOrWhiteSpace($dialog.SelectedPath)) {
+      return $dialog.SelectedPath
+    }
+    return ""
+  } catch {
+    Warn ('GUI picker could not be opened: {0}' -f $_.Exception.Message)
+    return ""
+  }
+}
+
 function Resolve-OpenWebUiTarget(
   [string]$PatcherRoot,
   [string]$RequestedTarget,
@@ -214,95 +376,156 @@ function Resolve-OpenWebUiTarget(
   [switch]$PromptForConfirmation
 ) {
   $repoRoot = (Resolve-Path (Join-Path $PatcherRoot '..')).Path
-  $candidates = [System.Collections.Generic.List[object]]::new()
+  $lastError = "No Open WebUI install was detected one level above patcher."
   $savedOwuiTarget = Get-ConfigValue -Config $SavedConfig -Name 'owui_target'
   $savedPythonExe = Get-ConfigValue -Config $SavedConfig -Name 'python_exe'
+  $localPythonCandidates = @(Get-LocalPythonCandidates -RepoRoot $repoRoot)
+  $localPackageCandidates = @(Get-LocalOpenWebUiPackageCandidates -RepoRoot $repoRoot)
 
-  function Add-TargetCandidate([string]$Value, [string]$Label) {
-    if ([string]::IsNullOrWhiteSpace($Value)) {
-      return
-    }
-    foreach ($existing in $candidates) {
-      if ($existing.Value -eq $Value.Trim()) {
-        return
+  function Get-FirstUsablePython([string[]]$PreferredCandidates) {
+    foreach ($candidate in $PreferredCandidates) {
+      if (-not [string]::IsNullOrWhiteSpace($candidate) -and (Test-Path $candidate)) {
+        return (Resolve-Path -LiteralPath $candidate).Path
       }
     }
-    $candidates.Add([pscustomobject]@{
-      Value = $Value.Trim()
-      Label = $Label
-    })
+
+    $pythonCmd = Get-Command python -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($pythonCmd) {
+      return $pythonCmd.Source
+    }
+
+    return ""
   }
 
-  Add-TargetCandidate -Value $RequestedTarget -Label 'requested OWUI target'
-  Add-TargetCandidate -Value $RequestedPython -Label 'requested Python'
-  Add-TargetCandidate -Value $savedOwuiTarget -Label 'saved OWUI target'
-  Add-TargetCandidate -Value $savedPythonExe -Label 'saved Python'
+  function New-ResolvedResultFromPackage([string]$PackageRoot, [string]$Source, [string]$SelectedInput, [string[]]$PreferredPythonCandidates) {
+    if (-not (Test-OpenWebUiPackageRoot -PackageRoot $PackageRoot)) {
+      return $null
+    }
 
-  $localRoot = $repoRoot
-  if (Test-Path (Join-Path $localRoot '.venv\Scripts\python.exe')) {
-    Add-TargetCandidate -Value $localRoot -Label 'local OWUI root'
+    $pythonForInfo = Get-FirstUsablePython -PreferredCandidates $PreferredPythonCandidates
+    $installInfo = New-OpenWebUiInstallInfoFromPackageRoot -PackageRoot $PackageRoot -PythonPath $pythonForInfo
+    if ([string]::IsNullOrWhiteSpace([string]$installInfo.python)) {
+      throw ('Open WebUI files were found at {0}, but no usable python.exe was found. Create/use .venv under {1}, or rerun with -PythonExe.' -f $PackageRoot, $repoRoot)
+    }
+
+    return [pscustomobject]@{
+      SelectedInput = $SelectedInput
+      Source = $Source
+      PythonPath = $installInfo.python
+      InstallInfo = $installInfo
+    }
   }
 
-  $pythonCmd = Get-Command python -ErrorAction SilentlyContinue | Select-Object -First 1
-  if ($pythonCmd) {
-    Add-TargetCandidate -Value $pythonCmd.Source -Label 'python on PATH'
-  }
+  function Try-ResolvePathCandidate([string]$Value, [string]$Label, [string[]]$PreferredPythonCandidates) {
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+      return $null
+    }
 
-  $resolvedTarget = $null
-  $defaultPrompt = ""
-  $lastError = "No Open WebUI install was detected."
-
-  foreach ($candidate in $candidates) {
     try {
-      $pythonPath = Resolve-PythonFromTarget -TargetPath $candidate.Value -BaseRoot $repoRoot
+      $resolvedValue = Resolve-AbsolutePath -CandidatePath $Value -BaseRoot $repoRoot
+      $item = Get-Item -LiteralPath $resolvedValue
+      if ($item.PSIsContainer) {
+        $folderPackageCandidates = @(Get-LocalOpenWebUiPackageCandidates -RepoRoot $resolvedValue)
+        foreach ($packageRoot in $folderPackageCandidates) {
+          $fromPackage = New-ResolvedResultFromPackage -PackageRoot $packageRoot -Source $Label -SelectedInput $Value -PreferredPythonCandidates $PreferredPythonCandidates
+          if ($fromPackage) {
+            return $fromPackage
+          }
+        }
+      }
+
+      $pythonPath = Resolve-PythonFromTarget -TargetPath $Value -BaseRoot $repoRoot
       $installInfo = Get-InstallInfo -PythonPath $pythonPath -Quiet
       if ($installInfo) {
-        $resolvedTarget = [pscustomobject]@{
-          SelectedInput = $candidate.Value
-          Source = $candidate.Label
+        return [pscustomobject]@{
+          SelectedInput = $Value
+          Source = $Label
           PythonPath = $pythonPath
           InstallInfo = $installInfo
         }
-        $defaultPrompt = $candidate.Value
-        break
       }
-      $lastError = ("Python does not appear to have Open WebUI installed: {0}" -f $pythonPath)
+      $scriptPackageRoots = @(
+        (Join-Path (Split-Path -Parent (Split-Path -Parent $pythonPath)) 'Lib\site-packages\open_webui')
+      )
+      foreach ($packageRoot in $scriptPackageRoots) {
+        if (Test-OpenWebUiPackageRoot -PackageRoot $packageRoot) {
+          return (New-ResolvedResultFromPackage -PackageRoot $packageRoot -Source $Label -SelectedInput $Value -PreferredPythonCandidates @($pythonPath))
+        }
+      }
+      Set-Variable -Name lastError -Scope 1 -Value ('Open WebUI is not importable from {0}' -f $pythonPath)
+    } catch {
+      Set-Variable -Name lastError -Scope 1 -Value $_.Exception.Message
+    }
+
+    return $null
+  }
+
+  # Highest priority: the patcher folder's parent. This is the required layout: .\owui\patcher.
+  foreach ($packageRoot in $localPackageCandidates) {
+    try {
+      $resolved = New-ResolvedResultFromPackage -PackageRoot $packageRoot -Source 'Open WebUI folder above patcher' -SelectedInput $repoRoot -PreferredPythonCandidates $localPythonCandidates
+      if ($resolved) {
+        Info ('Detected Open WebUI one level above patcher: {0}' -f $resolved.InstallInfo.package_root)
+        return $resolved
+      }
     } catch {
       $lastError = $_.Exception.Message
     }
   }
 
-  if ($resolvedTarget -and -not $PromptForConfirmation) {
-    return $resolvedTarget
+  foreach ($pythonPath in $localPythonCandidates) {
+    $resolved = Try-ResolvePathCandidate -Value $pythonPath -Label 'local Python above patcher' -PreferredPythonCandidates @($pythonPath)
+    if ($resolved) {
+      Info ('Detected Open WebUI through local Python above patcher: {0}' -f $resolved.PythonPath)
+      return $resolved
+    }
+  }
+
+  # Explicit command-line values come next. They should still work when patcher is kept outside OWUI.
+  foreach ($pair in @(
+    [pscustomobject]@{ Value = $RequestedTarget; Label = 'requested OWUI target' },
+    [pscustomobject]@{ Value = $RequestedPython; Label = 'requested Python' },
+    [pscustomobject]@{ Value = $savedOwuiTarget; Label = 'saved OWUI target' },
+    [pscustomobject]@{ Value = $savedPythonExe; Label = 'saved Python' }
+  )) {
+    $preferredPython = @($localPythonCandidates)
+    if ($pair.Label -like '*Python' -and -not [string]::IsNullOrWhiteSpace([string]$pair.Value)) {
+      $preferredPython = @([string]$pair.Value) + $preferredPython
+    }
+    $resolved = Try-ResolvePathCandidate -Value ([string]$pair.Value) -Label $pair.Label -PreferredPythonCandidates $preferredPython
+    if ($resolved) {
+      Info ('Detected Open WebUI via {0}' -f $resolved.Source)
+      return $resolved
+    }
   }
 
   if (-not $AllowPrompt) {
     Fail $lastError
   }
 
-  if ($resolvedTarget) {
-    Info ("Detected Open WebUI via {0}" -f $resolvedTarget.Source)
-  } else {
-    Warn $lastError
-  }
-
+  Warn $lastError
   while ($true) {
-    $inputValue = Read-TextPrompt -Prompt "Open WebUI root folder or python.exe" -Default $defaultPrompt
-    try {
-      $pythonPath = Resolve-PythonFromTarget -TargetPath $inputValue -BaseRoot $repoRoot
-      $installInfo = Get-InstallInfo -PythonPath $pythonPath -Quiet
-      if (-not $installInfo) {
-        throw ("Open WebUI is not importable from {0}" -f $pythonPath)
-      }
+    $selectedRoot = Select-OpenWebUiRootWithGui -InitialDirectory $repoRoot
+    if ([string]::IsNullOrWhiteSpace($selectedRoot)) {
+      Fail 'Open WebUI target selection was cancelled.'
+    }
 
-      return [pscustomobject]@{
-        SelectedInput = $inputValue
-        Source = 'prompted input'
-        PythonPath = $pythonPath
-        InstallInfo = $installInfo
-      }
+    $selectedPythonCandidates = @(Get-LocalPythonCandidates -RepoRoot $selectedRoot)
+    $resolved = Try-ResolvePathCandidate -Value $selectedRoot -Label 'GUI selected OWUI root' -PreferredPythonCandidates $selectedPythonCandidates
+    if ($resolved) {
+      return $resolved
+    }
+
+    Warn ('Selected folder is not a usable Open WebUI install: {0}' -f $selectedRoot)
+    try {
+      Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+      [System.Windows.Forms.MessageBox]::Show(
+        "That folder does not contain a usable Open WebUI install. Select the OWUI root that contains open_webui or Lib\site-packages\open_webui.",
+        "Open WebUI patcher",
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Warning
+      ) | Out-Null
     } catch {
-      Warn $_.Exception.Message
     }
   }
 }

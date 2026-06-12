@@ -20,7 +20,7 @@ OWUI_Patch/
 You can use it in either of these ways:
 
 1. Keep this repo anywhere and point it at an OWUI Python environment with `-PythonExe`.
-2. Drop the `patcher` folder inside an OWUI root that already has `.venv`, then run `install.ps1` with no arguments.
+2. Drop the `patcher` folder inside an OWUI root, then run `install.ps1` with no arguments. The installer checks one level above `patcher` first, so `C:\sand\fresh\OWUI_V4\patcher` resolves `C:\sand\fresh\OWUI_V4` automatically.
 
 The patcher now saves your chosen Open WebUI target, Python path, Tesseract path, and launcher host/port in `patcher\local.settings.json` so follow-up commands reuse the same machine-local answers.
 
@@ -51,9 +51,10 @@ Or:
 
 The installer:
 
-- prompts for the OWUI install location instead of assuming one
-- lets you confirm or override the Tesseract executable path
-- verifies the target Open WebUI version is `0.9.2` unless you use `-SkipVersionCheck`
+- auto-detects the OWUI install from the folder one level above `patcher` using local source, `.venv`, `venv`, `Lib\site-packages`, or `site-packages` layouts
+- opens a Windows folder picker only if no usable OWUI install is found relative to `patcher`
+- auto-detects Tesseract without interrupting the install; pass `-TesseractExe` to override it
+- verifies the target Open WebUI version is `0.9.6` unless you use `-SkipVersionCheck`
 - installs Python OCR dependencies
 - backs up every replaced file under `patcher\backups\...`
 - copies the patched payload into the target `site-packages\open_webui`

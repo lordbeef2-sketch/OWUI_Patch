@@ -24,6 +24,77 @@ function Get-FileHashHex([string]$Path) {
   return (Get-FileHash -Algorithm SHA256 -Path $Path).Hash.ToLowerInvariant()
 }
 
+function Test-PipAvailable([string]$PythonPath) {
+  & $PythonPath -m pip --version *> $null
+  if ($LASTEXITCODE -eq 0) {
+    return $true
+  }
+
+  Warn "pip is not available in the selected Python environment. Attempting to bootstrap it with ensurepip."
+  & $PythonPath -m ensurepip --upgrade
+  if ($LASTEXITCODE -eq 0) {
+    & $PythonPath -m pip --version *> $null
+    if ($LASTEXITCODE -eq 0) {
+      return $true
+    }
+  }
+
+  Warn "ensurepip could not provision pip in the selected environment. Falling back to a host Python pip if one is available."
+  return $false
+}
+
+function Resolve-HostPipPython([string]$TargetPythonPath) {
+  $candidates = @()
+
+  $pythonCmd = Get-Command python -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($pythonCmd) {
+    $candidates += $pythonCmd.Source
+  }
+
+  $pyCmd = Get-Command py -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($pyCmd) {
+    $candidates += $pyCmd.Source
+  }
+
+  foreach ($candidate in $candidates | Select-Object -Unique) {
+    if (-not $candidate) {
+      continue
+    }
+
+    if ($candidate -eq $TargetPythonPath) {
+      continue
+    }
+
+    if ((Split-Path -Leaf $candidate).ToLowerInvariant() -eq 'py.exe') {
+      & $candidate -m pip --version *> $null
+    } else {
+      & $candidate -m pip --version *> $null
+    }
+
+    if ($LASTEXITCODE -eq 0) {
+      return $candidate
+    }
+  }
+
+  return $null
+}
+
+function Install-PatcherDependencies([string]$TargetPythonPath, [string]$SitePackagesPath, $Dependencies) {
+  if (Test-PipAvailable -PythonPath $TargetPythonPath) {
+    & $TargetPythonPath -m pip install --disable-pip-version-check @($Dependencies)
+    return $LASTEXITCODE
+  }
+
+  $hostPipPython = Resolve-HostPipPython -TargetPythonPath $TargetPythonPath
+  if (-not $hostPipPython) {
+    Fail "Dependency installation failed because no usable pip was found. Install pip on a host Python or rerun with -SkipDependencyInstall."
+  }
+
+  Info ("Using host pip from {0} to install into {1}" -f $hostPipPython, $SitePackagesPath)
+  & $hostPipPython -m pip install --disable-pip-version-check --upgrade --target $SitePackagesPath @($Dependencies)
+  return $LASTEXITCODE
+}
+
 $Root = (Resolve-Path (Join-Path $PatcherRoot '..')).Path
 $ManifestPath = Join-Path $PatcherRoot 'patch_manifest.json'
 
@@ -34,8 +105,8 @@ if (-not (Test-Path $ManifestPath)) {
 $Manifest = Get-Content -Path $ManifestPath -Raw | ConvertFrom-Json
 $SavedConfig = Load-PatcherConfig -PatcherRoot $PatcherRoot
 $CanPrompt = (Get-IsInteractiveSession) -and (-not $NonInteractive)
-$ConfirmOwuiTarget = $CanPrompt -and (-not $OpenWebUiTarget) -and (-not $PythonExe)
-$ConfirmTesseract = $CanPrompt -and (-not $TesseractExe)
+$ConfirmOwuiTarget = $false
+$ConfirmTesseract = $false
 
 $ResolvedOwui = Resolve-OpenWebUiTarget `
   -PatcherRoot $PatcherRoot `
@@ -89,8 +160,8 @@ if (-not $SkipDependencyInstall -and $CanPrompt) {
 
 if ($InstallDependencies -and $Manifest.dependencies.Count -gt 0) {
   Info "Installing patch dependencies"
-  & $PythonPath -m pip install --disable-pip-version-check @($Manifest.dependencies)
-  if ($LASTEXITCODE -ne 0) {
+  $dependencyExitCode = Install-PatcherDependencies -TargetPythonPath $PythonPath -SitePackagesPath $SitePackagesRoot -Dependencies $Manifest.dependencies
+  if ($dependencyExitCode -ne 0) {
     Fail "Dependency installation failed"
   }
 } else {

@@ -92,6 +92,9 @@ foreach ($check in $Manifest.contains_checks) {
   }
 
   $text = Get-Content -Path $dst -Raw
+  if ($null -eq $text) {
+    $text = ''
+  }
   if (-not $text.Contains([string]$check.needle)) {
     $checkFailures += ("{0}: missing text in {1}" -f $check.label, $check.target)
   }
