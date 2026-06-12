@@ -1397,6 +1397,11 @@ def _build_sso_ui_html(request: Request) -> str:
       font-size: 15px;
       margin-bottom: 6px;
     }
+    .required-star {
+      color: #b91c1c;
+      font-weight: 800;
+      margin-left: 4px;
+    }
     .label-block span {
       color: var(--text-muted);
       font-size: 13px;
@@ -1553,17 +1558,17 @@ def _build_sso_ui_html(request: Request) -> str:
         <div class="row-grid">
           <label class="field-row">
             <div class="label-block">
-              <strong>TWC_AUTH_CLIENT_ID</strong>
+              <strong>TWC_AUTH_CLIENT_ID <span class="required-star" aria-label="required">*</span></strong>
               <span>One client id listed in TWC <code>authentication.client.ids</code>.</span>
             </div>
-            <div class="field-stack"><input id="twc_auth_client_id" type="text" autocomplete="off"></div>
+            <div class="field-stack"><input id="twc_auth_client_id" type="text" autocomplete="off" required></div>
           </label>
           <label class="field-row">
             <div class="label-block">
-              <strong>TWC_AUTH_CLIENT_SECRET</strong>
+              <strong>TWC_AUTH_CLIENT_SECRET <span class="required-star" aria-label="required">*</span></strong>
               <span>The TWC <code>authentication.client.secret</code> value. Workbench sends this as <code>X-Auth-Secret</code>.</span>
             </div>
-            <div class="field-stack"><input id="twc_auth_client_secret" type="password" autocomplete="new-password"></div>
+            <div class="field-stack"><input id="twc_auth_client_secret" type="password" autocomplete="new-password" required></div>
           </label>
           <label class="field-row">
             <div class="label-block">
@@ -2017,6 +2022,17 @@ async def update_sso_config(request: Request, form_data: SSOConfigForm, user=Dep
     )
     twc_auth_scope = _normalize_optional_text(form_data.twc_auth_scope) or _normalize_optional_text(form_data.scopes)
     twc_auth_scope = twc_auth_scope or 'openid'
+
+    missing_required = []
+    if not twc_auth_client_id:
+        missing_required.append('TWC_AUTH_CLIENT_ID')
+    if not twc_auth_client_secret:
+        missing_required.append('TWC_AUTH_CLIENT_SECRET')
+    if missing_required:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f'Missing required TWC SSO setting(s): {", ".join(missing_required)}',
+        )
 
     request.app.state.config.TWC_AUTH_CLIENT_ID = twc_auth_client_id
     request.app.state.config.TWC_AUTH_CLIENT_SECRET = twc_auth_client_secret
