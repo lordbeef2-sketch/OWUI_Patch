@@ -1176,59 +1176,73 @@ def _normalize_optional_text(value: Optional[str]) -> str:
     return (value or '').strip()
 
 
+def _get_config_value(request: Request, key: str, default=None):
+    try:
+        return getattr(request.app.state.config, key)
+    except AttributeError:
+        return default
+
+
 def _compute_sso_callback_url(request: Request, redirect_uri: Optional[str] = None) -> str:
     explicit_redirect = _normalize_optional_text(redirect_uri)
     if explicit_redirect:
         return explicit_redirect
-    redirect_base = str(request.app.state.config.WEBUI_URL or request.base_url).rstrip('/')
+    redirect_base = str(_get_config_value(request, 'WEBUI_URL') or request.base_url).rstrip('/')
     return f'{redirect_base}/oauth/oidc/login/callback'
 
 
 def _get_sso_config_payload(request: Request) -> dict:
-    discovery_url = _normalize_optional_text(request.app.state.config.OPENID_PROVIDER_URL)
-    user_id_claim = _normalize_optional_text(request.app.state.config.OAUTH_SUB_CLAIM) or 'sub'
-    twc_auth_client_id = _normalize_optional_text(request.app.state.config.TWC_AUTH_CLIENT_ID)
-    twc_auth_client_secret = _normalize_optional_text(request.app.state.config.TWC_AUTH_CLIENT_SECRET)
-    twc_auth_scope = _normalize_optional_text(request.app.state.config.TWC_AUTH_SCOPE) or 'openid'
+    discovery_url = _normalize_optional_text(_get_config_value(request, 'OPENID_PROVIDER_URL'))
+    redirect_uri = _normalize_optional_text(_get_config_value(request, 'OPENID_REDIRECT_URI'))
+    user_id_claim = _normalize_optional_text(_get_config_value(request, 'OAUTH_SUB_CLAIM')) or 'sub'
+    twc_auth_client_id = _normalize_optional_text(_get_config_value(request, 'TWC_AUTH_CLIENT_ID'))
+    twc_auth_client_secret = _normalize_optional_text(_get_config_value(request, 'TWC_AUTH_CLIENT_SECRET'))
+    twc_auth_scope = _normalize_optional_text(_get_config_value(request, 'TWC_AUTH_SCOPE')) or 'openid'
     return {
         'twc_auth_client_id': twc_auth_client_id,
         'twc_auth_client_secret': twc_auth_client_secret,
         'twc_auth_scope': twc_auth_scope,
-        'twc_saml_authorize_url': _normalize_optional_text(request.app.state.config.TWC_SAML_AUTHORIZE_URL),
-        'twc_saml_token_url': _normalize_optional_text(request.app.state.config.TWC_SAML_TOKEN_URL),
-        'twc_saml_login_path': _normalize_optional_text(request.app.state.config.TWC_SAML_LOGIN_PATH)
+        'twc_saml_authorize_url': _normalize_optional_text(_get_config_value(request, 'TWC_SAML_AUTHORIZE_URL')),
+        'twc_saml_token_url': _normalize_optional_text(_get_config_value(request, 'TWC_SAML_TOKEN_URL')),
+        'twc_saml_login_path': _normalize_optional_text(_get_config_value(request, 'TWC_SAML_LOGIN_PATH'))
         or '/authentication/authorize',
-        'twc_saml_login_port': _normalize_optional_text(str(request.app.state.config.TWC_SAML_LOGIN_PORT or '8443')),
-        'twc_saml_token_path': _normalize_optional_text(request.app.state.config.TWC_SAML_TOKEN_PATH)
+        'twc_saml_login_port': _normalize_optional_text(
+            str(_get_config_value(request, 'TWC_SAML_LOGIN_PORT', '8443') or '8443')
+        ),
+        'twc_saml_token_path': _normalize_optional_text(_get_config_value(request, 'TWC_SAML_TOKEN_PATH'))
         or '/authentication/api/token',
         'twc_saml_return_url_parameter': _normalize_optional_text(
-            request.app.state.config.TWC_SAML_RETURN_URL_PARAMETER
+            _get_config_value(request, 'TWC_SAML_RETURN_URL_PARAMETER')
         )
         or 'redirect_uri',
-        'twc_auth_server_overrides': _normalize_optional_text(request.app.state.config.TWC_AUTH_SERVER_OVERRIDES)
+        'twc_auth_server_overrides': _normalize_optional_text(
+            _get_config_value(request, 'TWC_AUTH_SERVER_OVERRIDES')
+        )
         or '{}',
         'discovery_url': discovery_url,
         'openid_provider_url': discovery_url,
-        'provider_name': _normalize_optional_text(request.app.state.config.OAUTH_PROVIDER_NAME) or 'oidc',
-        'client_id': _normalize_optional_text(request.app.state.config.OAUTH_CLIENT_ID) or twc_auth_client_id,
-        'client_secret': _normalize_optional_text(request.app.state.config.OAUTH_CLIENT_SECRET) or twc_auth_client_secret,
-        'redirect_uri': _normalize_optional_text(request.app.state.config.OPENID_REDIRECT_URI),
-        'computed_callback_url': _compute_sso_callback_url(request, request.app.state.config.OPENID_REDIRECT_URI),
-        'scopes': _normalize_optional_text(request.app.state.config.OAUTH_SCOPES) or twc_auth_scope,
-        'end_session_endpoint': _normalize_optional_text(request.app.state.config.OPENID_END_SESSION_ENDPOINT),
-        'token_endpoint_auth_method': _normalize_optional_text(request.app.state.config.OAUTH_TOKEN_ENDPOINT_AUTH_METHOD),
-        'code_challenge_method': _normalize_optional_text(request.app.state.config.OAUTH_CODE_CHALLENGE_METHOD),
+        'provider_name': _normalize_optional_text(_get_config_value(request, 'OAUTH_PROVIDER_NAME')) or 'oidc',
+        'client_id': _normalize_optional_text(_get_config_value(request, 'OAUTH_CLIENT_ID')) or twc_auth_client_id,
+        'client_secret': _normalize_optional_text(_get_config_value(request, 'OAUTH_CLIENT_SECRET')) or twc_auth_client_secret,
+        'redirect_uri': redirect_uri,
+        'computed_callback_url': _compute_sso_callback_url(request, redirect_uri),
+        'scopes': _normalize_optional_text(_get_config_value(request, 'OAUTH_SCOPES')) or twc_auth_scope,
+        'end_session_endpoint': _normalize_optional_text(_get_config_value(request, 'OPENID_END_SESSION_ENDPOINT')),
+        'token_endpoint_auth_method': _normalize_optional_text(
+            _get_config_value(request, 'OAUTH_TOKEN_ENDPOINT_AUTH_METHOD')
+        ),
+        'code_challenge_method': _normalize_optional_text(_get_config_value(request, 'OAUTH_CODE_CHALLENGE_METHOD')),
         'user_id_claim': user_id_claim,
         'sub_claim': user_id_claim,
-        'username_claim': _normalize_optional_text(request.app.state.config.OAUTH_USERNAME_CLAIM)
+        'username_claim': _normalize_optional_text(_get_config_value(request, 'OAUTH_USERNAME_CLAIM'))
         or 'preferred_username',
-        'email_claim': _normalize_optional_text(request.app.state.config.OAUTH_EMAIL_CLAIM) or 'email',
-        'picture_claim': _normalize_optional_text(request.app.state.config.OAUTH_PICTURE_CLAIM) or 'picture',
-        'groups_claim': _normalize_optional_text(request.app.state.config.OAUTH_GROUPS_CLAIM) or 'groups',
-        'enable_oauth_signup': bool(request.app.state.config.ENABLE_OAUTH_SIGNUP),
-        'oauth_auto_redirect': bool(request.app.state.config.OAUTH_AUTO_REDIRECT),
-        'merge_accounts_by_email': bool(request.app.state.config.OAUTH_MERGE_ACCOUNTS_BY_EMAIL),
-        'enable_password_auth': bool(request.app.state.config.ENABLE_PASSWORD_AUTH),
+        'email_claim': _normalize_optional_text(_get_config_value(request, 'OAUTH_EMAIL_CLAIM')) or 'email',
+        'picture_claim': _normalize_optional_text(_get_config_value(request, 'OAUTH_PICTURE_CLAIM')) or 'picture',
+        'groups_claim': _normalize_optional_text(_get_config_value(request, 'OAUTH_GROUPS_CLAIM')) or 'groups',
+        'enable_oauth_signup': bool(_get_config_value(request, 'ENABLE_OAUTH_SIGNUP', False)),
+        'oauth_auto_redirect': bool(_get_config_value(request, 'OAUTH_AUTO_REDIRECT', False)),
+        'merge_accounts_by_email': bool(_get_config_value(request, 'OAUTH_MERGE_ACCOUNTS_BY_EMAIL', False)),
+        'enable_password_auth': bool(_get_config_value(request, 'ENABLE_LOGIN_FORM', ENABLE_PASSWORD_AUTH)),
         'oauth_persistent_config_enabled': bool(ENABLE_OAUTH_PERSISTENT_CONFIG),
         'claim_presets': SSO_CLAIM_PRESETS,
     }
@@ -2073,7 +2087,7 @@ async def update_sso_config(request: Request, form_data: SSOConfigForm, user=Dep
     request.app.state.config.ENABLE_OAUTH_SIGNUP = form_data.enable_oauth_signup
     request.app.state.config.OAUTH_AUTO_REDIRECT = form_data.oauth_auto_redirect
     request.app.state.config.OAUTH_MERGE_ACCOUNTS_BY_EMAIL = form_data.merge_accounts_by_email
-    request.app.state.config.ENABLE_PASSWORD_AUTH = form_data.enable_password_auth
+    request.app.state.config.ENABLE_LOGIN_FORM = form_data.enable_password_auth
 
     _refresh_oidc_runtime(request)
     return _get_sso_config_payload(request)
